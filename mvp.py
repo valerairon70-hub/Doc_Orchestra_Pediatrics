@@ -3,28 +3,22 @@ Doc Orchestra — MVP Demo
 ========================
 Запуск: python mvp.py
 Затем открой в браузере:
-  Родитель : http://localhost:8080/parent
-  Врач     : http://localhost:8080/cockpit
-
-Работает в двух режимах:
-  DEMO  — без API ключа, с реалистичными заготовленными ответами
-  REAL  — с GEMINI_API_KEY в .env файле, настоящий ИИ
+  Родитель : http://localhost:8081/parent
+  Врач     : http://localhost:8081/cockpit
 """
 import asyncio
 import json
 import os
-import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 # --------------------------------------------------------------------------
-# Загрузка .env если есть
+# Загрузка .env
 # --------------------------------------------------------------------------
 _env_path = Path(__file__).parent / ".env"
 if _env_path.exists():
@@ -38,180 +32,117 @@ DEMO_MODE = not bool(ANTHROPIC_API_KEY)
 
 if DEMO_MODE:
     print("\n⚠️  DEMO MODE — ANTHROPIC_API_KEY не найден.")
-    print("    Добавь ANTHROPIC_API_KEY= в файл .env\n")
 else:
     print(f"\n✅ REAL MODE — Claude API подключён.\n")
 
 # --------------------------------------------------------------------------
-# Хранилище в памяти (для MVP, без БД)
+# Хранилище в памяти
 # --------------------------------------------------------------------------
-sessions: dict = {}       # session_id → {messages, soap, status, phase}
-cockpit_ws: list = []     # подключённые WebSocket врача
-parent_ws: dict = {}      # session_id → WebSocket родителя
+sessions: dict = {}
+cockpit_ws: list = []
+parent_ws: dict = {}
 
 # --------------------------------------------------------------------------
-# ИИ — Gemini или Demo
+# ИИ
 # --------------------------------------------------------------------------
 
 DEMO_RESPONSES = {
-    "greeting": (
-        "Здравствуйте! Я медицинский ассистент клиники. "
-        "Расскажите, пожалуйста, что беспокоит вашего ребёнка?"
-    ),
-    "complaint": (
-        "Понимаю, это беспокоит. Как давно появились эти симптомы? "
-        "И есть ли у ребёнка температура?"
-    ),
-    "details": (
-        "Хорошо, я всё записал. Уточните, пожалуйста — какой вес ребёнка "
-        "и были ли похожие эпизоды раньше?"
-    ),
+    "greeting": "Здравствуйте! Я медицинский ассистент. Расскажите, пожалуйста, что беспокоит вашего ребёнка?",
+    "complaint": "Понимаю, это беспокоит. Как давно появились симптомы? Есть ли температура?",
+    "details": "Хорошо, записал. Уточните — какой вес ребёнка и были ли похожие эпизоды раньше?",
     "waiting": (
-        "Спасибо, я передал всю информацию доктору. "
-        "Он рассмотрит ваш запрос и ответит в ближайшее время. "
-        "Если состояние ухудшится или появится затруднённое дыхание, "
-        "потеря сознания — немедленно вызывайте скорую помощь (103)."
+        "Спасибо. Я передал всю информацию доктору — он ответит в ближайшее время. "
+        "Если состояние ухудшится или появится затруднённое дыхание — немедленно вызывайте скорую 103."
     ),
 }
 
-DEMO_SOAP = """
-📋 SOAP ЗАМЕТКА — {name} ({age}, {sex})
+DEMO_SOAP = """📋 SOAP ЗАМЕТКА — Пациент (4 года, Ж)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 S — Субъективно:
-  Жалобы: {complaint}
-  Длительность: {duration}
-  Сопутствующие симптомы: слабость, снижение аппетита
-  Температура: субфебрильная 37.3°C
+  Жалобы: температура 38.5°C, сыпь на лице
+  Длительность: с утра (~8 часов)
+  Сопутствующие симптомы: вялость, снижение аппетита
 
 O — Объективно:
-  Вес: {weight} кг
-  Бледность кожных покровов
-  Лабораторные данные: ожидают загрузки отчёта
+  Вес: 14 кг
+  Температура: 38.5°C
+  Сыпь: гиперемия кожи лица, характер бледнеющий при надавливании
 
-A — Оценка:
-  Рабочий диагноз: Железодефицитная анемия (предположительно)
-  Дифференциальный: Анемия хронических заболеваний
-  ⚠️ Красный флаг: Hb ниже целевого для возраста — требует уточнения
+A — Предварительная оценка:
+  Рабочий диагноз: ОРВИ с экзантемой (предположительно)
+  Дифференциальный: краснуха, розеола, аллергическая реакция
+  ⚠️ Красный флаг: не выявлен — сыпь бледнеет при надавливании
 
-P — План:
-  1-я линия: ОАК с ретикулоцитами, ферритин, CRP
-  Препараты: Феррум Лек, ожидает одобрения врача
-  Наблюдение: повтор ОАК через 4 недели
+P — Рекомендуемые действия:
+  Осмотр очный или видео-консультация
+  Парацетамол 15 мг/кг при t > 38.5°C
+  Контроль через 24 часа
 
 💬 Черновик ответа родителю:
-  «Доктор ознакомился с информацией. Необходимо сдать анализы крови:
-  ОАК + ферритин + CRP. После результатов назначим лечение.
-  При нарастании бледности или вялости — обратитесь сразу.»
-"""
+Здравствуйте! Доктор ознакомился с информацией. По описанию — картина ОРВИ с кожной реакцией, не требует срочной госпитализации. При температуре выше 38.5°C давайте парацетамол из расчёта 15 мг/кг. Обильное питьё. Если сыпь распространится или появится затруднённое дыхание — обратитесь немедленно. Свяжемся с вами для уточнения через 24 часа."""
 
 
 def _demo_smart_response(session_id: str, user_message: str, phase: str) -> str:
-    """
-    Контекстно-умный demo ответ.
-    Читает что написал родитель и не повторяет вопросы на которые уже ответили.
-    """
     session = sessions.get(session_id, {})
-    all_parent_msgs = " ".join(
+    all_msgs = " ".join(
         m["text"].lower() for m in session.get("messages", []) if m["role"] == "parent"
     ) + " " + user_message.lower()
-    bot_msgs = [m["text"] for m in session.get("messages", []) if m["role"] == "bot"]
-    last_bot = bot_msgs[-1] if bot_msgs else ""
-    msg_lower = user_message.lower()
 
-    # --- Определяем что родитель уже рассказал ---
-    told_temp     = any(w in all_parent_msgs for w in ["температур", "жар", "горит", "38", "39", "40", "37"])
-    told_duration = any(w in all_parent_msgs for w in ["минут", "час", "день", "дней", "давно", "сегодня", "вчера", "неделю"])
-    told_weight   = any(w in all_parent_msgs for w in ["кг", "килограмм", "вес "])
-    told_rash     = any(w in all_parent_msgs for w in ["сыпь", "пятн", "краснот", "высыпан", "точки"])
-    told_age      = any(w in all_parent_msgs for w in ["лет", "месяц", "год", "годик"])
+    told_temp = any(w in all_msgs for w in ["температур", "жар", "горит", "38", "39", "40", "37"])
+    told_duration = any(w in all_msgs for w in ["минут", "час", "день", "дней", "давно", "сегодня", "вчера", "неделю"])
+    told_weight = any(w in all_msgs for w in ["кг", "килограмм", "вес "])
+    told_rash = any(w in all_msgs for w in ["сыпь", "пятн", "краснот", "высыпан", "точки"])
+    told_age = any(w in all_msgs for w in ["лет", "месяц", "год", "годик"])
 
-    # --- Детектируем раздражение / возражение родителя ---
-    frustrated = any(w in msg_lower for w in [
-        "при чем", "зачем", "я же", "уже говор", "уже сказ", "почему вы",
-        "это важно", "не понимаю", "странный вопрос", "не отвечаете"
+    frustrated = any(w in user_message.lower() for w in [
+        "при чем", "зачем", "я же", "уже говор", "уже сказ", "почему вы", "не понимаю"
     ])
-
-    # --- Детектируем экстренную ситуацию ---
-    emergency = any(w in all_parent_msgs for w in [
-        "не дышит", "без сознания", "судорог", "синеет", "задыхается",
-        "потерял сознание", "очень тяжело", "скорую", "104", "105"
+    emergency = any(w in all_msgs for w in [
+        "не дышит", "без сознания", "судорог", "синеет", "задыхается", "потерял сознание"
     ])
 
     if emergency:
         return (
             "⚠️ Это требует НЕМЕДЛЕННОЙ помощи!\n\n"
-            "Пожалуйста, прямо сейчас вызовите скорую помощь — 103.\n\n"
-            "Пока едет скорая:\n"
-            "• Уложите ребёнка на бок\n"
-            "• Не оставляйте одного\n"
-            "• Расстегните одежду\n\n"
+            "Пожалуйста, прямо сейчас вызовите скорую — 103.\n\n"
+            "Пока едет скорая:\n• Уложите ребёнка на бок\n"
+            "• Не оставляйте одного\n• Расстегните одежду\n\n"
             "Врач уведомлён о срочном обращении."
         )
 
     if frustrated:
-        # Извиняемся и объясняем зачем нужна информация
-        if "вес" in last_bot:
-            return (
-                "Понимаю ваше беспокойство, и прошу прощения за непонятный вопрос. "
-                "Вес ребёнка нужен врачу для точного расчёта дозировки лекарств, если они понадобятся. "
-                "Но если сейчас не знаете точно — не переживайте, можно пропустить. "
-                "Скажите лучше: это первый раз когда появилась такая температура и сыпь, "
-                "или подобное уже было раньше?"
-            )
         return (
-            "Прошу прощения, я понимаю как это волнительно. "
-            "Позвольте уточнить самое важное для врача — "
-            "есть ли у ребёнка затруднённое дыхание или сыпь не бледнеет при надавливании?"
+            "Понимаю ваше беспокойство, и прошу прощения. "
+            "Скажите главное: есть ли у ребёнка затруднённое дыхание "
+            "или сыпь не бледнеет при надавливании?"
         )
 
     if phase == "greeting":
         return DEMO_RESPONSES["greeting"]
 
     if phase == "complaint":
-        # Не спрашиваем про температуру если уже знаем
+        if told_temp and told_rash and told_duration:
+            return "Записал симптомы. Уточните: сыпь бледнеет если нажать пальцем? И ребёнок сейчас активен или вялый?"
         if told_temp and told_rash:
-            if told_duration:
-                return (
-                    "Понял, записал. Температура и сыпь на лице — это важные симптомы. "
-                    "Уточните: сыпь бледнеет если нажать на неё пальцем? "
-                    "И ребёнок сейчас активен или вялый?"
-                )
-            return (
-                "Записал. Как давно появилась температура — несколько часов или с утра?"
-            )
-        if told_temp and not told_rash:
-            return (
-                "Понял, температура уже записана. "
-                "Есть ли какие-то высыпания на коже, горле или во рту?"
-            )
-        if told_rash and not told_temp:
-            return (
-                "Сыпь записал. Есть ли у ребёнка температура прямо сейчас? "
-                "Если да — сколько градусов?"
-            )
+            return "Записал. Как давно появились симптомы — несколько часов или с утра?"
+        if told_temp:
+            return "Температура записана. Есть ли какие-то высыпания на коже или слизистых?"
+        if told_rash:
+            return "Сыпь записал. Есть ли у ребёнка температура прямо сейчас?"
         return DEMO_RESPONSES["complaint"]
 
     if phase == "details":
-        # Не спрашиваем про вес если уже рассказали, ищем что ещё нужно
-        questions = []
+        if not told_weight and not told_age:
+            return "Хорошо. Чтобы врач мог подобрать правильную дозировку — скажите возраст и примерный вес ребёнка?"
         if not told_weight:
-            questions.append("вес ребёнка")
+            return "Почти всё есть. Последнее — примерный вес ребёнка (нужно для расчёта дозы)?"
         if not told_age:
-            questions.append("точный возраст")
-
-        if not questions:
-            # Всё собрали — переходим к ожиданию
-            return (
-                "Отлично, вся необходимая информация собрана. "
-                "Передаю доктору — он ответит в ближайшее время. "
-                "Если состояние ухудшится — вызывайте скорую 103."
-            )
-
-        q = questions[0]
+            return "Понял. Уточните сколько лет ребёнку?"
         return (
-            f"Хорошо, это важная информация. "
-            f"Последнее что нужно врачу — {q}. Можете уточнить?"
+            "Отлично, вся информация собрана. "
+            "Передаю доктору — он ответит в ближайшее время. "
+            "Если состояние ухудшится — вызывайте скорую 103."
         )
 
     return DEMO_RESPONSES["waiting"]
@@ -219,42 +150,39 @@ def _demo_smart_response(session_id: str, user_message: str, phase: str) -> str:
 
 async def get_ai_response(session_id: str, user_message: str, phase: str) -> str:
     if DEMO_MODE:
-        await asyncio.sleep(1.2)  # имитация задержки
+        await asyncio.sleep(1.2)
         return _demo_smart_response(session_id, user_message, phase)
 
-    # REAL MODE — Claude
     try:
         import anthropic
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         session = sessions.get(session_id, {})
 
-        # Строим историю диалога для Claude
         messages = []
         for m in session.get("messages", [])[-12:]:
             role = "user" if m["role"] == "parent" else "assistant"
             messages.append({"role": role, "content": m["text"]})
 
-        # Добавляем текущее сообщение родителя
+        # Claude API требует непустой контент
+        msg_content = user_message.strip() or "Поприветствуй родителя и предложи рассказать о проблеме ребёнка."
         if not messages or messages[-1]["role"] != "user":
-            messages.append({"role": "user", "content": user_message})
+            messages.append({"role": "user", "content": msg_content})
         else:
-            # Если последнее уже user — это первое сообщение (приветствие без текста)
-            messages[-1]["content"] = user_message
+            messages[-1]["content"] = msg_content
 
         response = await client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=512,
-            system="""Ты — медицинский ассистент педиатрической клиники. Твоя задача: собрать информацию о состоянии ребёнка и передать её врачу.
+            system="""Ты — медицинский ассистент педиатрической клиники. Собираешь информацию о состоянии ребёнка для врача.
 
-ПРАВИЛА (строго обязательны):
-1. Отвечай тепло, с эмпатией, на том языке на котором пишет родитель.
-2. НИКОГДА не ставь диагноз и не предлагай лечение — только собирай информацию.
-3. Задавай ОДИН конкретный вопрос за раз.
-4. Не повторяй вопросы на которые уже ответили.
-5. Внимательно читай каждое сообщение — родитель мог уже ответить на твой вопрос.
-6. Если родитель раздражён или тревожится — сначала успокой, потом спрашивай.
-7. Экстренная ситуация (не дышит, судороги, потеря сознания) → НЕМЕДЛЕННО: "Вызовите скорую 103 прямо сейчас!"
-8. Когда соберёшь: жалобу, длительность, основные симптомы — скажи что передаёшь врачу.
+ПРАВИЛА:
+1. Отвечай тепло, с эмпатией, на языке родителя.
+2. НИКОГДА не ставь диагноз и не назначай лечение.
+3. Задавай ОДИН вопрос за раз.
+4. Не повторяй вопросы на которые уже ответили — внимательно читай историю.
+5. Если родитель раздражён или тревожится — сначала успокой, потом спрашивай.
+6. Экстренная ситуация (не дышит, судороги, потеря сознания) → сразу: "Вызовите скорую 103 прямо сейчас!"
+7. Когда собрал: жалобу, длительность, ключевые симптомы, возраст, вес — скажи что передаёшь врачу.
 
 Ты НЕ врач. Ты помощник который помогает врачу быстро понять ситуацию.""",
             messages=messages,
@@ -269,19 +197,9 @@ async def generate_soap(session_id: str) -> str:
     msgs = session.get("messages", [])
 
     if DEMO_MODE:
-        await asyncio.sleep(2)
-        parent_msgs = " ".join(m["text"] for m in msgs if m["role"] == "parent")
-        complaint = parent_msgs[:80] + "..." if len(parent_msgs) > 80 else parent_msgs
-        return DEMO_SOAP.format(
-            name="Пациент",
-            age="4 года",
-            sex="Ж",
-            complaint=complaint,
-            duration="~2 недели",
-            weight="14.2",
-        )
+        await asyncio.sleep(1.5)
+        return DEMO_SOAP
 
-    # REAL MODE — Claude генерирует SOAP
     try:
         import anthropic
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -292,34 +210,58 @@ async def generate_soap(session_id: str) -> str:
         response = await client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=1024,
-            system="Ты клинический ассистент педиатра. Составляй краткие структурированные SOAP заметки на русском языке для врача.",
-            messages=[{"role": "user", "content": f"""На основе диалога с родителем составь SOAP заметку для врача-педиатра.
+            system="Ты клинический ассистент педиатра. Составляй краткие структурированные SOAP заметки на русском языке.",
+            messages=[{"role": "user", "content": f"""На основе диалога составь SOAP заметку для врача-педиатра.
 
 ДИАЛОГ:
 {history_text}
 
-Формат ответа:
+Формат:
 📋 SOAP ЗАМЕТКА
 ━━━━━━━━━━━━━━━━━━━━━━
 
 S — Субъективно:
-  (жалобы со слов родителя, длительность, динамика)
+  (жалобы, длительность, динамика)
 
 O — Объективно:
-  (симптомы, данные которые сообщил родитель — температура, сыпь и т.д.)
+  (симптомы: температура, сыпь, вес, возраст — всё что сообщил родитель)
 
 A — Предварительная оценка:
-  (возможные диагнозы для рассмотрения врачом, красные флаги если есть)
+  (возможные диагнозы для врача, красные флаги если есть)
 
 P — Рекомендуемые действия:
-  (какие анализы/осмотр нужны, что уточнить)
+  (какие анализы/осмотр, что уточнить)
 
 💬 Черновик ответа родителю:
-  (тёплый, эмпатичный текст БЕЗ диагноза, что делать пока ждёт врача)"""}],
+(тёплый текст БЕЗ диагноза, что делать пока ждёт)"""}],
         )
         return response.content[0].text
     except Exception as e:
         return f"Ошибка генерации SOAP: {e}"
+
+
+def extract_patient_label(session: dict) -> str:
+    """Извлекает имя/возраст пациента из переписки для отображения в кокпите."""
+    all_text = " ".join(m["text"] for m in session.get("messages", []) if m["role"] == "parent")
+
+    import re
+    # Ищем возраст
+    age_match = re.search(r'(\d+)\s*(лет|год|годик|месяц)', all_text)
+    age = age_match.group(0) if age_match else None
+
+    # Ищем имя (слово с большой буквы после "зовут", "имя", "ребёнка")
+    name_match = re.search(r'(?:зовут|имя|ребёнка|дочь|сын)\s+([А-ЯЁ][а-яё]+)', all_text)
+    name = name_match.group(1) if name_match else None
+
+    if name and age:
+        return f"{name}, {age}"
+    if name:
+        return name
+    if age:
+        return f"Ребёнок {age}"
+    # Берём первые слова первого сообщения как превью
+    first_msg = next((m["text"] for m in session.get("messages", []) if m["role"] == "parent"), "")
+    return first_msg[:25] + "…" if len(first_msg) > 25 else first_msg or "Новый запрос"
 
 
 # --------------------------------------------------------------------------
@@ -332,7 +274,7 @@ def get_or_create_session(session_id: str) -> dict:
             "id": session_id,
             "messages": [],
             "soap": None,
-            "status": "active",   # active | waiting_doctor | approved | sent
+            "status": "active",
             "phase": "greeting",
             "created_at": datetime.now().strftime("%H:%M"),
         }
@@ -340,18 +282,16 @@ def get_or_create_session(session_id: str) -> dict:
 
 
 def advance_phase(session: dict) -> str:
-    """Переводит диалог через фазы по количеству сообщений родителя."""
     parent_count = sum(1 for m in session["messages"] if m["role"] == "parent")
     if parent_count <= 1:
         return "complaint"
-    elif parent_count <= 3:
+    elif parent_count <= 2:
         return "details"
     else:
         return "waiting"
 
 
 async def notify_cockpit(event: dict):
-    """Отправить обновление всем подключённым кокпитам врача."""
     dead = []
     for ws in cockpit_ws:
         try:
@@ -371,22 +311,39 @@ app = FastAPI(title="Doc Orchestra MVP")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return HTMLResponse("""
-    <html><body style="font-family:sans-serif;max-width:600px;margin:60px auto;text-align:center">
-    <h1>🎻 Doc Orchestra MVP</h1>
-    <p>Демонстрация системы асинхронного ведения пациентов</p>
-    <div style="display:flex;gap:20px;justify-content:center;margin-top:40px">
-      <a href="/parent" style="padding:20px 40px;background:#25D366;color:white;border-radius:12px;text-decoration:none;font-size:18px">
-        📱 Интерфейс родителя
-      </a>
-      <a href="/cockpit" style="padding:20px 40px;background:#2563eb;color:white;border-radius:12px;text-decoration:none;font-size:18px">
-        🩺 Кокпит врача
-      </a>
-    </div>
-    <p style="margin-top:30px;color:#888">{'⚠️ DEMO MODE' if DEMO_MODE else '✅ Gemini подключён'}</p>
-    </body></html>
-    """.replace("{'⚠️ DEMO MODE' if DEMO_MODE else '✅ Gemini подключён'}",
-                "⚠️ DEMO MODE — без Gemini API" if DEMO_MODE else "✅ Gemini API подключён"))
+    mode_text = "⚠️ DEMO MODE" if DEMO_MODE else "✅ Claude AI подключён"
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doc Orchestra</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh;
+       display: flex; align-items: center; justify-content: center; }}
+.card {{ text-align: center; padding: 48px 40px; }}
+h1 {{ font-size: 32px; margin-bottom: 8px; }}
+.sub {{ color: #888; margin-bottom: 48px; font-size: 16px; }}
+.links {{ display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }}
+a {{ padding: 18px 36px; border-radius: 12px; text-decoration: none; font-size: 16px; font-weight: 600; transition: opacity 0.15s; }}
+a:hover {{ opacity: 0.85; }}
+.parent {{ background: #25D366; color: white; }}
+.cockpit {{ background: #ff6b35; color: white; }}
+.mode {{ margin-top: 32px; font-size: 13px; color: #666; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🎻 Doc Orchestra</h1>
+  <p class="sub">AI-ассистент для педиатрической клиники</p>
+  <div class="links">
+    <a href="/parent" class="parent">📱 Интерфейс родителя</a>
+    <a href="/cockpit" class="cockpit">🩺 Кокпит врача</a>
+  </div>
+  <p class="mode">{mode_text}</p>
+</div>
+</body></html>""")
 
 
 # --------------------------------------------------------------------------
@@ -401,69 +358,148 @@ PARENT_HTML = """<!DOCTYPE html>
 <title>Медицинский ассистент</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, sans-serif; background: #e5ddd5; height: 100vh; display: flex; flex-direction: column; }
-.header { background: #075e54; color: white; padding: 16px 20px; display: flex; align-items: center; gap: 12px; }
-.avatar { width: 42px; height: 42px; background: #25D366; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; }
-.header-text h3 { font-size: 16px; } .header-text p { font-size: 12px; opacity: 0.8; }
-.messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-.msg { max-width: 75%; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.5; position: relative; }
-.msg.bot { background: white; align-self: flex-start; border-radius: 0 8px 8px 8px; }
-.msg.user { background: #dcf8c6; align-self: flex-end; border-radius: 8px 0 8px 8px; }
-.msg.system { background: #fff3cd; align-self: center; font-size: 12px; color: #856404; border-radius: 8px; padding: 6px 12px; max-width: 90%; text-align: center; }
-.msg .time { font-size: 10px; color: #999; text-align: right; margin-top: 4px; }
-.typing { background: white; padding: 12px; border-radius: 0 8px 8px 8px; display: inline-flex; gap: 4px; align-self: flex-start; }
-.typing span { width: 8px; height: 8px; background: #999; border-radius: 50%; animation: bounce 1.2s infinite; }
-.typing span:nth-child(2) { animation-delay: 0.2s; } .typing span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-8px)} }
-.input-area { background: #f0f0f0; padding: 12px 16px; display: flex; gap: 8px; align-items: center; }
-textarea { flex: 1; padding: 10px 14px; border: none; border-radius: 24px; resize: none; font-size: 14px; outline: none; max-height: 100px; }
-button { width: 44px; height: 44px; background: #25D366; border: none; border-radius: 50%; cursor: pointer; color: white; font-size: 20px; display: flex; align-items: center; justify-content: center; }
-button:disabled { background: #ccc; }
-.badge { background: #ff3b30; color: white; border-radius: 50%; padding: 2px 6px; font-size: 11px; }
+body { font-family: -apple-system, sans-serif; background: #e5ddd5; height: 100dvh; display: flex; flex-direction: column; }
+
+.header { background: #075e54; color: white; padding: 14px 18px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.avatar { width: 42px; height: 42px; background: #25D366; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+.header-info h3 { font-size: 15px; font-weight: 600; }
+.header-info p { font-size: 12px; opacity: 0.75; margin-top: 2px; }
+#status-indicator { font-size: 12px; opacity: 0.75; }
+
+.messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
+.msg { max-width: 78%; padding: 8px 12px 6px; border-radius: 8px; font-size: 14px; line-height: 1.55; word-break: break-word; }
+.msg.bot { background: white; align-self: flex-start; border-radius: 0 8px 8px 8px; box-shadow: 0 1px 1px rgba(0,0,0,0.08); }
+.msg.user { background: #dcf8c6; align-self: flex-end; border-radius: 8px 0 8px 8px; box-shadow: 0 1px 1px rgba(0,0,0,0.08); }
+.msg.system { background: rgba(255,255,255,0.85); align-self: center; font-size: 12px; color: #555; border-radius: 8px; padding: 7px 14px; max-width: 88%; text-align: center; border: 1px solid #ddd; }
+.msg.emergency { background: #ffe4e4; border: 1px solid #ff4444; align-self: center; max-width: 92%; text-align: center; }
+.msg .time { font-size: 10px; color: #aaa; text-align: right; margin-top: 3px; }
+
+.typing { background: white; padding: 12px 16px; border-radius: 0 8px 8px 8px; display: inline-flex; gap: 4px; align-self: flex-start; box-shadow: 0 1px 1px rgba(0,0,0,0.08); }
+.typing span { width: 7px; height: 7px; background: #bbb; border-radius: 50%; animation: bounce 1.2s infinite; }
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-7px)} }
+
+.waiting-banner { background: #fff8e1; border-top: 1px solid #ffe082; padding: 12px 18px; text-align: center; font-size: 13px; color: #795548; flex-shrink: 0; display: none; }
+.waiting-banner.show { display: block; }
+
+.input-area { background: #f0f0f0; padding: 10px 14px; display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; }
+textarea { flex: 1; padding: 10px 14px; border: none; border-radius: 22px; resize: none; font-size: 14px; outline: none; max-height: 120px; line-height: 1.4; font-family: inherit; background: white; }
+textarea:disabled { background: #f5f5f5; color: #aaa; }
+button#sendBtn { width: 44px; height: 44px; background: #25D366; border: none; border-radius: 50%; cursor: pointer; color: white; font-size: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.15s; }
+button#sendBtn:disabled { background: #ccc; cursor: default; }
 </style>
 </head>
 <body>
 <div class="header">
   <div class="avatar">🩺</div>
-  <div class="header-text">
+  <div class="header-info">
     <h3>Медицинский ассистент</h3>
-    <p id="status">Онлайн • Отвечает мгновенно</p>
+    <p id="status-indicator">На связи</p>
   </div>
 </div>
+
 <div class="messages" id="messages"></div>
+
+<div class="waiting-banner" id="waiting-banner">
+  ⏳ Информация передана доктору — ожидайте ответа. При ухудшении — 📞 103
+</div>
+
 <div class="input-area">
-  <textarea id="input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)"></textarea>
+  <textarea id="input" placeholder="Напишите сообщение..." rows="1"
+    oninput="autoResize(this)" onkeydown="handleKey(event)"></textarea>
   <button id="sendBtn" onclick="sendMessage()">➤</button>
 </div>
 
 <script>
 const SESSION_ID = 'SESSION_PLACEHOLDER';
+const STORAGE_KEY = 'doc_orch_' + SESSION_ID;
 let ws;
-let isWaiting = false;
+let locked = false; // заблокировано после передачи врачу
+
+// Восстановить историю из localStorage
+function restoreHistory() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return false;
+    const data = JSON.parse(saved);
+    if (data.messages) {
+      data.messages.forEach(m => addMessageRaw(m.text, m.role, m.time, false));
+    }
+    if (data.locked) {
+      setLocked(true);
+    }
+    return true;
+  } catch(e) { return false; }
+}
+
+function saveToStorage(text, role) {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    const data = saved ? JSON.parse(saved) : { messages: [], locked: false };
+    data.messages.push({ text, role, time: now() });
+    data.locked = locked;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch(e) {}
+}
+
+function setLocked(val) {
+  locked = val;
+  const inp = document.getElementById('input');
+  const btn = document.getElementById('sendBtn');
+  const banner = document.getElementById('waiting-banner');
+  inp.disabled = val;
+  btn.disabled = val;
+  if (val) {
+    banner.classList.add('show');
+    document.getElementById('status-indicator').textContent = '⏳ Ожидает ответа врача';
+    inp.placeholder = 'Ожидайте ответа врача...';
+  }
+}
 
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws/parent/' + SESSION_ID);
   ws.onmessage = (e) => {
     const data = JSON.parse(e.data);
-    if (data.type === 'message') addMessage(data.text, 'bot');
-    else if (data.type === 'typing') showTyping(data.show);
-    else if (data.type === 'status_update') {
-      document.getElementById('status').textContent = data.text;
-      if (data.system_msg) addMessage(data.system_msg, 'system');
+    if (data.type === 'message') {
+      addMessageRaw(data.text, 'bot', null, true);
+    } else if (data.type === 'typing') {
+      showTyping(data.show);
+    } else if (data.type === 'status_update') {
+      document.getElementById('status-indicator').textContent = data.text || '';
+      if (data.system_msg) addMessageRaw(data.system_msg, 'system', null, true);
+      if (data.locked) setLocked(true);
+    } else if (data.type === 'doctor_reply') {
+      setLocked(false);
+      document.getElementById('status-indicator').textContent = '✅ Врач ответил';
+      document.getElementById('waiting-banner').classList.remove('show');
+      addMessageRaw(data.text, 'bot', null, true);
     }
   };
-  ws.onclose = () => setTimeout(connect, 2000);
+  ws.onclose = () => {
+    document.getElementById('status-indicator').textContent = 'Переподключение...';
+    setTimeout(connect, 2500);
+  };
+  ws.onopen = () => {
+    document.getElementById('status-indicator').textContent = 'На связи';
+  };
 }
 
-function addMessage(text, role) {
+function now() {
+  return new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+}
+
+function addMessageRaw(text, role, time, save) {
+  removeTyping();
   const div = document.getElementById('messages');
   const el = document.createElement('div');
   el.className = 'msg ' + role;
-  const time = new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
-  el.innerHTML = text.replace(/\\n/g, '<br>') + '<div class="time">' + time + '</div>';
+  const t = time || now();
+  const isSystem = role === 'system';
+  el.innerHTML = text.split(String.fromCharCode(10)).join('<br>') + (isSystem ? '' : '<div class="time">' + t + '</div>');
   div.appendChild(el);
   div.scrollTop = div.scrollHeight;
-  removeTyping();
+  if (save) saveToStorage(text, role);
 }
 
 function showTyping(show) {
@@ -483,6 +519,11 @@ function removeTyping() {
   if (t) t.remove();
 }
 
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 }
@@ -490,24 +531,35 @@ function handleKey(e) {
 function sendMessage() {
   const input = document.getElementById('input');
   const text = input.value.trim();
-  if (!text || isWaiting) return;
-  addMessage(text, 'user');
+  if (!text || locked) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    // WebSocket ещё не готов — ждём и повторяем через 800ms
+    document.getElementById('status-indicator').textContent = 'Подключение...';
+    setTimeout(() => sendMessage(), 800);
+    return;
+  }
+  addMessageRaw(text, 'user', null, true);
   ws.send(JSON.stringify({type: 'message', text: text}));
   input.value = '';
-  isWaiting = true;
-  document.getElementById('sendBtn').disabled = true;
-  setTimeout(() => { isWaiting = false; document.getElementById('sendBtn').disabled = false; }, 3000);
+  input.style.height = 'auto';
 }
 
+// При загрузке страницы
+const hadHistory = restoreHistory();
 connect();
+// Если история была — не ждём нового приветствия
+if (hadHistory) {
+  // восстановлено, не посылаем запрос на приветствие
+}
 </script>
 </body></html>"""
 
 
 @app.get("/parent", response_class=HTMLResponse)
 async def parent_page():
-    session_id = str(uuid.uuid4())[:8]
-    return HTMLResponse(PARENT_HTML.replace("SESSION_PLACEHOLDER", session_id))
+    # Один и тот же session_id для каждой загрузки на устройстве (через JS localStorage)
+    # На сервере создаём сессию по запросу. ID генерируется клиентом через localStorage.
+    return HTMLResponse(PARENT_HTML.replace("SESSION_PLACEHOLDER", str(uuid.uuid4())[:8]))
 
 
 @app.websocket("/ws/parent/{session_id}")
@@ -516,12 +568,24 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
     parent_ws[session_id] = websocket
     session = get_or_create_session(session_id)
 
-    # Отправить приветствие
-    await websocket.send_text(json.dumps({"type": "typing", "show": True}))
-    greeting = await get_ai_response(session_id, "", "greeting")
-    await websocket.send_text(json.dumps({"type": "typing", "show": False}))
-    await websocket.send_text(json.dumps({"type": "message", "text": greeting}))
-    session["messages"].append({"role": "bot", "text": greeting, "time": datetime.now().isoformat()})
+    # Приветствие запускаем фоновой задачей — не блокируем приём сообщений
+    async def send_greeting():
+        if not session["messages"]:
+            await websocket.send_text(json.dumps({"type": "typing", "show": True}))
+            greeting = await get_ai_response(session_id, "", "greeting")
+            await websocket.send_text(json.dumps({"type": "typing", "show": False}))
+            await websocket.send_text(json.dumps({"type": "message", "text": greeting}))
+            session["messages"].append({"role": "bot", "text": greeting, "time": datetime.now().isoformat()})
+
+    asyncio.create_task(send_greeting())
+
+    # Если сессия уже в ожидании врача — восстановить статус
+    if session.get("status") == "waiting_doctor":
+        await websocket.send_text(json.dumps({
+            "type": "status_update",
+            "text": "⏳ Ожидает ответа врача",
+            "locked": True
+        }))
 
     try:
         while True:
@@ -529,41 +593,52 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
             if data.get("type") != "message":
                 continue
 
+            # Блокируем входящие сообщения если уже у врача
+            if session.get("status") == "waiting_doctor":
+                await websocket.send_text(json.dumps({
+                    "type": "message",
+                    "text": "ℹ️ Ваш запрос уже передан доктору. Ожидайте ответа."
+                }))
+                continue
+
             user_text = data["text"]
             session["messages"].append({"role": "parent", "text": user_text, "time": datetime.now().isoformat()})
 
-            # Показать индикатор набора
             await websocket.send_text(json.dumps({"type": "typing", "show": True}))
 
             phase = advance_phase(session)
             session["phase"] = phase
 
             if phase == "waiting":
-                # Достаточно инфо — генерируем SOAP и отправляем врачу
-                bot_reply = DEMO_RESPONSES["waiting"] if DEMO_MODE else await get_ai_response(session_id, user_text, phase)
+                bot_reply = await get_ai_response(session_id, user_text, phase)
                 await websocket.send_text(json.dumps({"type": "typing", "show": False}))
                 await websocket.send_text(json.dumps({"type": "message", "text": bot_reply}))
                 session["messages"].append({"role": "bot", "text": bot_reply})
 
-                # Статус — ожидание врача
+                # Блокируем ввод — ждём врача
                 await websocket.send_text(json.dumps({
                     "type": "status_update",
                     "text": "⏳ Ожидает ответа врача",
-                    "system_msg": "ℹ️ Вся информация передана доктору. Ожидайте — врач ответит вам в ближайшее время."
+                    "system_msg": "ℹ️ Информация передана доктору. Ожидайте — врач ответит вам в ближайшее время.",
+                    "locked": True
                 }))
 
                 session["status"] = "waiting_doctor"
                 soap = await generate_soap(session_id)
                 session["soap"] = soap
+                label = extract_patient_label(session)
 
-                # Уведомить кокпит врача
                 await notify_cockpit({
                     "type": "new_case",
                     "session_id": session_id,
+                    "label": label,
                     "preview": user_text[:60],
                     "soap": soap,
                     "time": datetime.now().strftime("%H:%M"),
-                    "messages_count": len([m for m in session["messages"] if m["role"] == "parent"]),
+                    "messages": [
+                        {"role": m["role"], "text": m["text"]}
+                        for m in session["messages"]
+                    ],
                 })
             else:
                 bot_reply = await get_ai_response(session_id, user_text, phase)
@@ -583,193 +658,383 @@ COCKPIT_HTML = """<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Doc Orchestra — Кокпит врача</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, sans-serif; background: #f1f5f9; min-height: 100vh; }
-.header { background: #1e3a5f; color: white; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-.header h1 { font-size: 20px; } .header .badge { background: #ef4444; color: white; border-radius: 12px; padding: 2px 10px; font-size: 13px; }
-.mode-badge { background: #f59e0b; color: #7c2d12; padding: 3px 10px; border-radius: 8px; font-size: 12px; font-weight: bold; }
-.layout { display: flex; height: calc(100vh - 60px); }
-.sidebar { width: 300px; background: white; border-right: 1px solid #e2e8f0; overflow-y: auto; }
-.sidebar-header { padding: 16px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
-.case-item { padding: 14px 16px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: background 0.1s; }
-.case-item:hover { background: #f8fafc; }
-.case-item.active { background: #eff6ff; border-left: 3px solid #2563eb; }
-.case-item.urgent { border-left: 3px solid #ef4444; }
-.case-item .title { font-weight: 600; font-size: 14px; color: #1e293b; display: flex; align-items: center; gap: 6px; }
-.case-item .preview { font-size: 12px; color: #64748b; margin-top: 4px; }
-.case-item .meta { font-size: 11px; color: #94a3b8; margin-top: 4px; display: flex; justify-content: space-between; }
-.main { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
-.empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; gap: 12px; }
-.empty .icon { font-size: 48px; }
-.soap-card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-.soap-card h2 { font-size: 16px; color: #1e293b; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-.soap-content { font-family: monospace; font-size: 13px; line-height: 1.8; color: #334155; white-space: pre-wrap; background: #f8fafc; padding: 16px; border-radius: 8px; }
-.actions { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-.actions h3 { font-size: 14px; color: #475569; margin-bottom: 12px; }
-.draft-edit { width: 100%; min-height: 80px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; resize: vertical; margin-bottom: 12px; }
-.btn-row { display: flex; gap: 10px; }
-.btn { padding: 10px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: opacity 0.15s; }
-.btn:hover { opacity: 0.85; }
-.btn-approve { background: #22c55e; color: white; }
-.btn-edit { background: #f59e0b; color: white; }
-.btn-reject { background: #ef4444; color: white; }
-.toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: white; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
-.toast.show { opacity: 1; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.dot-waiting { background: #f59e0b; animation: pulse 1.5s infinite; }
+body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100dvh; }
+
+.header { background: #0f0f23; border-bottom: 1px solid #2a2a4a; padding: 14px 24px;
+          display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; font-weight: 700; color: white; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.badge { background: #ff6b35; color: white; border-radius: 20px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
+.mode-badge { padding: 4px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; }
+.mode-demo { background: #3a2a00; color: #ff6b35; border: 1px solid #ff6b35; }
+.mode-real { background: #002a15; color: #22c55e; border: 1px solid #22c55e; }
+.hint { font-size: 11px; color: #555; }
+
+.layout { display: flex; height: calc(100dvh - 57px); }
+
+/* Sidebar */
+.sidebar { width: 280px; background: #0f0f23; border-right: 1px solid #2a2a4a; display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-header { padding: 14px 16px; border-bottom: 1px solid #2a2a4a; font-size: 11px; font-weight: 700; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+.case-list { flex: 1; overflow-y: auto; }
+.empty-sidebar { padding: 32px 16px; text-align: center; color: #444; font-size: 13px; line-height: 1.6; }
+.empty-sidebar a { color: #ff6b35; text-decoration: none; }
+
+.case-item { padding: 13px 16px; border-bottom: 1px solid #1a1a35; cursor: pointer; transition: background 0.1s; }
+.case-item:hover { background: #1e1e3a; }
+.case-item.active { background: #1e1e3a; border-left: 3px solid #ff6b35; }
+.case-item .title { font-size: 14px; font-weight: 600; color: #e0e0e0; display: flex; align-items: center; gap: 7px; }
+.case-item .preview { font-size: 12px; color: #666; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.case-item .meta { font-size: 11px; color: #555; margin-top: 4px; display: flex; justify-content: space-between; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot-waiting { background: #ff6b35; animation: pulse 1.5s infinite; }
 .dot-approved { background: #22c55e; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.dot-rejected { background: #555; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+/* Main */
+.main { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 18px; }
+.empty-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #444; gap: 10px; }
+.empty-main .icon { font-size: 40px; }
+
+/* Cards */
+.card { background: #0f0f23; border: 1px solid #2a2a4a; border-radius: 12px; padding: 20px; }
+.card-title { font-size: 13px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+
+/* Tabs: SOAP / Диалог */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #2a2a4a; margin-bottom: 16px; }
+.tab { padding: 8px 18px; font-size: 13px; font-weight: 600; color: #555; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+.tab.active { color: #ff6b35; border-bottom-color: #ff6b35; }
+.tab:hover { color: #aaa; }
+
+.soap-content { font-family: 'Menlo', 'Monaco', monospace; font-size: 12.5px; line-height: 1.9; color: #c0c0d0; white-space: pre-wrap; }
+.dialog-content { display: flex; flex-direction: column; gap: 8px; }
+.d-msg { padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; max-width: 85%; }
+.d-msg.parent { background: #1e3a5f; color: #b0cce0; align-self: flex-end; }
+.d-msg.bot { background: #1e1e35; color: #c0c0d0; align-self: flex-start; }
+.d-msg .role { font-size: 10px; font-weight: 700; opacity: 0.6; margin-bottom: 3px; text-transform: uppercase; }
+
+/* Actions */
+.draft-label { font-size: 12px; font-weight: 700; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+textarea.draft-edit { width: 100%; min-height: 90px; padding: 12px 14px; background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 8px; color: #e0e0e0; font-size: 13px; line-height: 1.55; resize: vertical; font-family: inherit; outline: none; transition: border-color 0.15s; }
+textarea.draft-edit:focus { border-color: #ff6b35; }
+.btn-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.btn { padding: 10px 22px; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 700; transition: opacity 0.15s; }
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn-approve { background: #22c55e; color: white; }
+.btn-edit { background: #2a2a4a; color: #ccc; }
+.btn-reject { background: #2a2a4a; color: #ef4444; border: 1px solid #ef4444; }
+.btn-archive { background: #2a2a4a; color: #888; }
+
+/* Reject form (inline) */
+.reject-form { display: none; margin-top: 10px; }
+.reject-form.show { display: block; }
+.reject-form textarea { width: 100%; padding: 10px 12px; background: #1a1a2e; border: 1px solid #ef4444; border-radius: 8px; color: #e0e0e0; font-size: 13px; resize: none; font-family: inherit; outline: none; }
+.reject-form .reject-actions { display: flex; gap: 8px; margin-top: 8px; }
+.btn-reject-confirm { background: #ef4444; color: white; }
+
+/* Toast */
+.toast { position: fixed; bottom: 24px; right: 24px; background: #1e1e3a; color: white;
+         border: 1px solid #2a2a4a; padding: 12px 20px; border-radius: 10px; font-size: 13px;
+         opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100; max-width: 320px; }
+.toast.show { opacity: 1; }
+
+/* Keyboard hint */
+.kbd { display: inline-block; background: #2a2a4a; border-radius: 4px; padding: 1px 6px; font-size: 11px; color: #888; font-family: monospace; }
+
+@media (max-width: 640px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; height: 140px; }
+  .case-list { display: flex; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .case-item { min-width: 200px; border-bottom: none; border-right: 1px solid #1a1a35; }
+  .hint { display: none; }
+}
 </style>
 </head>
 <body>
 <div class="header">
-  <div style="display:flex;align-items:center;gap:16px">
-    <h1>🎻 Doc Orchestra — Кокпит врача</h1>
+  <div style="display:flex;align-items:center;gap:14px">
+    <h1>🎻 Doc Orchestra</h1>
     <span class="badge" id="count-badge" style="display:none">0</span>
   </div>
-  <span class="mode-badge" id="mode-badge" style="background:#22c55e;color:white">MODE_PLACEHOLDER</span>
+  <div class="header-right">
+    <span class="hint"><span class="kbd">A</span> одобрить &nbsp;<span class="kbd">Esc</span> закрыть</span>
+    <span class="mode-badge MODE_CLASS" id="mode-badge">MODE_PLACEHOLDER</span>
+  </div>
 </div>
+
 <div class="layout">
   <div class="sidebar">
-    <div class="sidebar-header">Очередь запросов</div>
-    <div id="case-list">
-      <div style="padding:24px;color:#94a3b8;font-size:13px;text-align:center">
-        Ожидаем запросы от родителей...<br><br>
-        <a href="/parent" target="_blank" style="color:#2563eb">↗ Открыть интерфейс родителя</a>
+    <div class="sidebar-header" style="display:flex;align-items:center;justify-content:space-between;">
+      Очередь
+      <button onclick="reloadSessions()" style="background:none;border:none;color:#ff6b35;cursor:pointer;font-size:13px;padding:0;" title="Обновить список">↺ обновить</button>
+    </div>
+    <div class="case-list" id="case-list">
+      <div class="empty-sidebar">
+        Нет запросов<br><br>
+        <a href="/parent" target="_blank">↗ Открыть чат родителя</a>
       </div>
     </div>
   </div>
+
   <div class="main" id="main-content">
-    <div class="empty">
+    <div class="empty-main">
       <div class="icon">📋</div>
-      <div style="font-size:16px;font-weight:500">Очередь пуста</div>
-      <div style="font-size:13px">Новые запросы появятся здесь автоматически</div>
-      <a href="/parent" target="_blank" style="color:#2563eb;font-size:13px;margin-top:8px">Открыть интерфейс родителя для теста →</a>
+      <div style="font-size:15px;font-weight:600;color:#666">Очередь пуста</div>
+      <div style="font-size:13px;color:#444">Новые запросы появятся здесь автоматически</div>
     </div>
   </div>
 </div>
+
 <div class="toast" id="toast"></div>
 
 <script>
 let ws;
 let cases = {};
 let activeSession = null;
+let activeTab = 'soap';
 
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws/cockpit');
   ws.onmessage = (e) => {
     const data = JSON.parse(e.data);
     if (data.type === 'new_case') handleNewCase(data);
-    else if (data.type === 'init') { data.cases.forEach(c => handleNewCase(c)); }
+    else if (data.type === 'init') data.cases.forEach(c => handleNewCase(c, false));
   };
-  ws.onclose = () => setTimeout(connect, 2000);
+  ws.onclose = () => setTimeout(connect, 2500);
 }
 
-function handleNewCase(data) {
+function handleNewCase(data, notify = true) {
   cases[data.session_id] = data;
   renderSidebar();
   if (!activeSession) selectCase(data.session_id);
-  showToast('🔔 Новый запрос от родителя');
+  if (notify) {
+    showToast('🔔 Новый запрос: ' + (data.label || data.session_id));
+    // Попытка звукового уведомления
+    try { new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAA...').play(); } catch(e) {}
+  }
 }
 
 function renderSidebar() {
   const list = document.getElementById('case-list');
-  const count = Object.keys(cases).length;
+  const count = Object.values(cases).filter(c => c.status !== 'archived').length;
   const badge = document.getElementById('count-badge');
-  badge.textContent = count;
-  badge.style.display = count > 0 ? 'inline' : 'none';
+  const pending = Object.values(cases).filter(c => c.status === 'waiting_doctor' || !c.status).length;
+  badge.textContent = pending;
+  badge.style.display = pending > 0 ? 'inline' : 'none';
 
-  if (count === 0) {
-    list.innerHTML = '<div style="padding:24px;color:#94a3b8;font-size:13px;text-align:center">Нет запросов</div>';
+  const visible = Object.values(cases).filter(c => c.status !== 'archived');
+  if (visible.length === 0) {
+    list.innerHTML = '<div class="empty-sidebar">Нет запросов<br><br><a href="/parent" target="_blank">↗ Открыть чат родителя</a></div>';
     return;
   }
 
-  list.innerHTML = Object.values(cases).map(c => `
-    <div class="case-item ${c.session_id === activeSession ? 'active' : ''}" onclick="selectCase('${c.session_id}')">
+  list.innerHTML = visible.map(c => {
+    const dotClass = c.status === 'approved' ? 'dot-approved' : c.status === 'rejected' ? 'dot-rejected' : 'dot-waiting';
+    const statusText = c.status === 'approved' ? '✅ Отправлено' : c.status === 'rejected' ? '✗ Отклонено' : '⏳ Ожидает';
+    return `<div class="case-item ${c.session_id === activeSession ? 'active' : ''}" onclick="selectCase('${c.session_id}')">
       <div class="title">
-        <span class="status-dot ${c.status === 'approved' ? 'dot-approved' : 'dot-waiting'}"></span>
-        Пациент · ${c.session_id}
+        <span class="status-dot ${dotClass}"></span>
+        ${escapeHtml(c.label || c.session_id)}
       </div>
-      <div class="preview">${c.preview || 'Нет описания'}</div>
-      <div class="meta">
-        <span>${c.time}</span>
-        <span>${c.status === 'approved' ? '✅ Одобрено' : '⏳ Ожидает'}</span>
-      </div>
-    </div>
-  `).join('');
+      <div class="preview">${escapeHtml(c.preview || '')}</div>
+      <div class="meta"><span>${c.time}</span><span>${statusText}</span></div>
+    </div>`;
+  }).join('');
 }
 
 function selectCase(sessionId) {
   activeSession = sessionId;
-  const c = cases[sessionId];
+  activeTab = 'soap';
   renderSidebar();
+  const c = cases[sessionId];
+  if (!c) return;
 
   const draft = extractDraft(c.soap || '');
+  const isApproved = c.status === 'approved' || c.status === 'rejected';
 
   document.getElementById('main-content').innerHTML = `
-    <div class="soap-card">
-      <h2>📋 SOAP Заметка
-        <span style="font-size:12px;background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:6px">
-          ${c.status === 'approved' ? '✅ Одобрено' : '⏳ Ожидает одобрения'}
-        </span>
-      </h2>
-      <div class="soap-content">${(c.soap || 'Генерация...').replace(/[⚠️💬📋🔬💊]/g, m => m)}</div>
+    <div class="card">
+      <div class="tabs">
+        <div class="tab active" id="tab-soap" onclick="switchTab('soap')">📋 SOAP</div>
+        <div class="tab" id="tab-dialog" onclick="switchTab('dialog')">💬 Диалог</div>
+      </div>
+      <div id="panel-soap" class="soap-content">${escapeHtml(c.soap || 'Генерация SOAP...')}</div>
+      <div id="panel-dialog" style="display:none" class="dialog-content">
+        ${renderDialog(c.messages || [])}
+      </div>
     </div>
-    <div class="actions">
-      <h3>💬 Ответ родителю (отредактируй при необходимости):</h3>
-      <textarea class="draft-edit" id="draft-text">${draft}</textarea>
+
+    <div class="card" id="actions-card">
+      <div class="draft-label">Ответ родителю</div>
+      <textarea class="draft-edit" id="draft-text" ${isApproved ? 'disabled' : ''}>${escapeHtml(draft)}</textarea>
       <div class="btn-row">
-        <button class="btn btn-approve" onclick="approveCase('${sessionId}')">✅ Одобрить и отправить</button>
-        <button class="btn btn-edit" onclick="focusDraft()">✏️ Редактировать</button>
-        <button class="btn btn-reject" onclick="rejectCase('${sessionId}')">✗ Отклонить</button>
+        <button class="btn btn-approve" id="btn-approve" onclick="approveCase('${sessionId}')"
+          ${isApproved ? 'disabled' : ''} title="Клавиша A">
+          ✅ Одобрить и отправить
+        </button>
+        <button class="btn btn-edit" onclick="focusDraft()" ${isApproved ? 'disabled' : ''}>
+          ✏️ Редактировать
+        </button>
+        <button class="btn btn-reject" onclick="toggleRejectForm()" ${isApproved ? 'disabled' : ''}>
+          ✗ Отклонить
+        </button>
+        <button class="btn btn-archive" onclick="archiveCase('${sessionId}')">
+          🗄 Убрать
+        </button>
+      </div>
+      <div class="reject-form" id="reject-form">
+        <textarea id="reject-reason" rows="2" placeholder="Причина (необязательно)..."></textarea>
+        <div class="reject-actions">
+          <button class="btn btn-reject-confirm" onclick="rejectCase('${sessionId}')">Отклонить</button>
+          <button class="btn btn-archive" onclick="toggleRejectForm()">Отмена</button>
+        </div>
       </div>
     </div>
   `;
 }
 
-function extractDraft(soap) {
-  const match = soap.match(/💬[^:]*:([\s\S]*?)(?=$|\\n\\n)/);
-  if (match) return match[1].trim().replace(/«|»/g, '');
-  return 'Доктор ознакомился с вашим запросом. Пожалуйста, следуйте рекомендациям ниже...';
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tab-soap').className = 'tab' + (tab === 'soap' ? ' active' : '');
+  document.getElementById('tab-dialog').className = 'tab' + (tab === 'dialog' ? ' active' : '');
+  document.getElementById('panel-soap').style.display = tab === 'soap' ? 'block' : 'none';
+  document.getElementById('panel-dialog').style.display = tab === 'dialog' ? 'flex' : 'none';
 }
 
-function focusDraft() { document.getElementById('draft-text')?.focus(); }
+function renderDialog(messages) {
+  if (!messages || messages.length === 0) return '<div style="color:#555;font-size:13px">Диалог недоступен</div>';
+  return messages.map(m => {
+    const isParent = m.role === 'parent';
+    const roleLabel = isParent ? 'Родитель' : 'Ассистент';
+    return `<div class="d-msg ${isParent ? 'parent' : 'bot'}">
+      <div class="role">${roleLabel}</div>
+      ${escapeHtml(m.text).replace(/\n/g, '<br>')}
+    </div>`;
+  }).join('');
+}
+
+function extractDraft(soap) {
+  // Ищем секцию после "💬 Черновик ответа родителю:" или "Черновик ответа родителю:"
+  const idx = soap.indexOf('Черновик ответа родителю:');
+  if (idx === -1) return '';
+  let draft = soap.slice(idx + 'Черновик ответа родителю:'.length).trim();
+  // Убираем кавычки и лишние пробелы
+  draft = draft.replace(/^[«"']|[»"']$/g, '').trim();
+  return draft;
+}
+
+function focusDraft() {
+  const el = document.getElementById('draft-text');
+  if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+}
+
+function toggleRejectForm() {
+  const f = document.getElementById('reject-form');
+  if (f) f.classList.toggle('show');
+}
 
 function approveCase(sessionId) {
-  const draft = document.getElementById('draft-text')?.value || '';
+  const draft = document.getElementById('draft-text')?.value?.trim() || '';
+  if (!draft) { showToast('⚠️ Напишите ответ родителю перед отправкой'); focusDraft(); return; }
   ws.send(JSON.stringify({ type: 'approve', session_id: sessionId, message: draft }));
-  cases[sessionId].status = 'approved';
+  if (cases[sessionId]) cases[sessionId].status = 'approved';
   renderSidebar();
   selectCase(sessionId);
-  showToast('✅ Ответ одобрен и отправлен родителю');
+  showToast('✅ Ответ отправлен родителю');
 }
 
 function rejectCase(sessionId) {
-  const reason = prompt('Причина отклонения:');
-  if (reason) {
-    ws.send(JSON.stringify({ type: 'reject', session_id: sessionId, reason: reason }));
-    showToast('✗ Кейс отклонён: ' + reason);
-  }
+  const reason = document.getElementById('reject-reason')?.value?.trim() || '';
+  ws.send(JSON.stringify({ type: 'reject', session_id: sessionId, reason }));
+  if (cases[sessionId]) cases[sessionId].status = 'rejected';
+  renderSidebar();
+  selectCase(sessionId);
+  showToast('✗ Кейс отклонён');
 }
+
+function archiveCase(sessionId) {
+  if (cases[sessionId]) cases[sessionId].status = 'archived';
+  if (activeSession === sessionId) {
+    activeSession = null;
+    document.getElementById('main-content').innerHTML = `
+      <div class="empty-main">
+        <div class="icon">📋</div>
+        <div style="font-size:15px;font-weight:600;color:#666">Выберите запрос</div>
+      </div>`;
+  }
+  renderSidebar();
+}
+
+// Горячие клавиши
+document.addEventListener('keydown', (e) => {
+  if (!activeSession) return;
+  const tag = document.activeElement.tagName;
+  if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+  if (e.key === 'a' || e.key === 'A') { e.preventDefault(); approveCase(activeSession); }
+  if (e.key === 'Escape') { archiveCase(activeSession); }
+});
 
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3000);
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function reloadSessions() {
+  fetch('/api/sessions').then(r => r.json()).then(list => {
+    list.forEach(c => handleNewCase(c, false));
+    if (list.length === 0) showToast('Нет активных запросов');
+    else showToast('Загружено: ' + list.length + ' запрос(ов)');
+  });
 }
 
 connect();
+// При загрузке — подгрузить через REST (страховка если WS ещё не подключился)
+setTimeout(reloadSessions, 1500);
 </script>
 </body></html>"""
 
 
+@app.get("/api/sessions")
+async def api_sessions():
+    """REST эндпоинт для кокпита — получить все активные сессии."""
+    from fastapi.responses import JSONResponse
+    result = []
+    for sid, s in sessions.items():
+        if s.get("status") in ("waiting_doctor", "approved", "rejected"):
+            result.append({
+                "type": "new_case",
+                "session_id": sid,
+                "label": extract_patient_label(s),
+                "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
+                "soap": s.get("soap"),
+                "time": s.get("created_at", ""),
+                "status": s.get("status"),
+                "messages": [{"role": m["role"], "text": m["text"]} for m in s.get("messages", [])],
+            })
+    return JSONResponse(result)
+
+
 @app.get("/cockpit", response_class=HTMLResponse)
 async def cockpit_page():
-    mode = "⚠️ DEMO MODE" if DEMO_MODE else "✅ Claude AI подключён"
-    return HTMLResponse(COCKPIT_HTML.replace("MODE_PLACEHOLDER", mode))
+    mode = "⚠️ DEMO" if DEMO_MODE else "✅ Claude AI"
+    cls = "mode-demo" if DEMO_MODE else "mode-real"
+    return HTMLResponse(
+        COCKPIT_HTML
+        .replace("MODE_PLACEHOLDER", mode)
+        .replace("MODE_CLASS", cls)
+    )
 
 
 @app.websocket("/ws/cockpit")
@@ -777,12 +1042,22 @@ async def cockpit_websocket(websocket: WebSocket):
     await websocket.accept()
     cockpit_ws.append(websocket)
 
-    # Отправить существующие кейсы при подключении
-    existing = [
-        {"type": "new_case", "session_id": sid, **{k: v for k, v in s.items() if k != "messages"}}
-        for sid, s in sessions.items()
-        if s.get("status") in ("waiting_doctor", "approved")
-    ]
+    existing = []
+    for sid, s in sessions.items():
+        if s.get("status") in ("waiting_doctor", "approved", "rejected"):
+            existing.append({
+                "type": "new_case",
+                "session_id": sid,
+                "label": extract_patient_label(s),
+                "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
+                "soap": s.get("soap"),
+                "time": s.get("created_at", ""),
+                "status": s.get("status"),
+                "messages": [
+                    {"role": m["role"], "text": m["text"]}
+                    for m in s.get("messages", [])
+                ],
+            })
     if existing:
         await websocket.send_text(json.dumps({"type": "init", "cases": existing}, ensure_ascii=False))
 
@@ -795,18 +1070,11 @@ async def cockpit_websocket(websocket: WebSocket):
                 approved_msg = data.get("message", "")
                 if sid in sessions:
                     sessions[sid]["status"] = "approved"
-                    sessions[sid]["approved_message"] = approved_msg
-                    # Отправить ответ родителю
                     parent_socket = parent_ws.get(sid)
                     if parent_socket:
                         try:
                             await parent_socket.send_text(json.dumps({
-                                "type": "status_update",
-                                "text": "✅ Врач ответил",
-                                "system_msg": f"👨‍⚕️ Ответ врача: {approved_msg}"
-                            }))
-                            await parent_socket.send_text(json.dumps({
-                                "type": "message",
+                                "type": "doctor_reply",
                                 "text": f"👨‍⚕️ {approved_msg}"
                             }))
                         except Exception:
@@ -830,7 +1098,7 @@ if __name__ == "__main__":
     print("=" * 55)
     print("  🎻 Doc Orchestra MVP")
     print("=" * 55)
-    print(f"  Режим: {'⚠️  DEMO (без Gemini)' if DEMO_MODE else '✅ REAL (Gemini подключён)'}")
+    print(f"  Режим: {'⚠️  DEMO (без Claude)' if DEMO_MODE else '✅ REAL (Claude подключён)'}")
     print()
     print("  Открой в браузере:")
     print("  📱 Родитель  →  http://localhost:8081/parent")
