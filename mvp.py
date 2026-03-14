@@ -9,7 +9,6 @@ Doc Orchestra — MVP Demo
 import asyncio
 import json
 import os
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -173,18 +172,37 @@ async def get_ai_response(session_id: str, user_message: str, phase: str) -> str
         response = await client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=512,
-            system="""Ты — медицинский ассистент педиатрической клиники. Собираешь информацию о состоянии ребёнка для врача.
+            system="""Ты — медицинский ассистент педиатрической клиники. Собираешь информацию о ребёнке для врача.
 
-ПРАВИЛА:
-1. Отвечай тепло, с эмпатией, на языке родителя.
-2. НИКОГДА не ставь диагноз и не назначай лечение.
-3. Задавай ОДИН вопрос за раз.
-4. Не повторяй вопросы на которые уже ответили — внимательно читай историю.
-5. Если родитель раздражён или тревожится — сначала успокой, потом спрашивай.
-6. Экстренная ситуация (не дышит, судороги, потеря сознания) → сразу: "Вызовите скорую 103 прямо сейчас!"
-7. Когда собрал: жалобу, длительность, ключевые симптомы, возраст, вес — скажи что передаёшь врачу.
+ПРАВИЛА ДИАЛОГА:
+1. Отвечай кратко, тепло, по-человечески.
+2. Задавай СТРОГО ОДИН вопрос за раз.
+3. Внимательно читай историю — не повторяй вопросы на которые уже ответили.
+4. Если родитель сказал что чего-то НЕТ — не уточняй повторно.
+5. Если родитель раздражён — коротко извинись и задай следующий вопрос.
+6. Если спрашивают про запись/приём — отвечай: "Врач сам свяжется с вами после того как я передам информацию."
+7. ЭКСТРЕННО (не дышит / судороги / потеря сознания) → только: "Немедленно вызовите скорую — 103!"
+8. Никогда не ставь диагнозы и не назначай лечение.
 
-Ты НЕ врач. Ты помощник который помогает врачу быстро понять ситуацию.""",
+ЧТО СОБРАТЬ (в порядке):
+1. Главная жалоба — родитель сам рассказывает
+2. Температура — если не назвали
+3. Как давно началось
+4. Возраст ребёнка
+
+КОГДА ЗАКАНЧИВАТЬ:
+Как только у тебя есть: жалоба + температура + длительность + возраст — напиши прощальное сообщение И добавь в самом конце маркер [ГОТОВО].
+
+Прощальное сообщение должно:
+- Кратко подтвердить что ты собрал: "Записал: температура Х°С, [симптомы], [возраст], началось [когда]."
+- Сообщить что передаёшь врачу
+- Если родитель спрашивал про приём — ответить на это
+- Закончить тепло
+
+Пример финального сообщения:
+"Записал: температура 38,5°С, красные пятна на лице, 5 лет, началось сегодня. Передаю врачу — он свяжется с вами в течение нескольких минут. По поводу приёма — врач сам уточнит удобное время. [ГОТОВО]"
+
+ВАЖНО: маркер [ГОТОВО] — только в самом конце последнего сообщения. В остальных сообщениях его не используй.""",
             messages=messages,
         )
         return response.content[0].text
@@ -279,16 +297,6 @@ def get_or_create_session(session_id: str) -> dict:
             "created_at": datetime.now().strftime("%H:%M"),
         }
     return sessions[session_id]
-
-
-def advance_phase(session: dict) -> str:
-    parent_count = sum(1 for m in session["messages"] if m["role"] == "parent")
-    if parent_count <= 1:
-        return "complaint"
-    elif parent_count <= 2:
-        return "details"
-    else:
-        return "waiting"
 
 
 async def notify_cockpit(event: dict):
@@ -412,7 +420,13 @@ button#sendBtn:disabled { background: #ccc; cursor: default; }
 </div>
 
 <script>
-const SESSION_ID = 'SESSION_PLACEHOLDER';
+// session_id хранится в localStorage — не сбрасывается при перезагрузке страницы
+const _PERSIST_KEY = 'doc_orch_sid';
+const SESSION_ID = localStorage.getItem(_PERSIST_KEY) || (() => {
+  const id = Math.random().toString(36).substr(2, 9);
+  localStorage.setItem(_PERSIST_KEY, id);
+  return id;
+})();
 const STORAGE_KEY = 'doc_orch_' + SESSION_ID;
 let ws;
 let locked = false; // заблокировано после передачи врачу
@@ -557,9 +571,8 @@ if (hadHistory) {
 
 @app.get("/parent", response_class=HTMLResponse)
 async def parent_page():
-    # Один и тот же session_id для каждой загрузки на устройстве (через JS localStorage)
-    # На сервере создаём сессию по запросу. ID генерируется клиентом через localStorage.
-    return HTMLResponse(PARENT_HTML.replace("SESSION_PLACEHOLDER", str(uuid.uuid4())[:8]))
+    # session_id генерируется и хранится на клиенте (localStorage) — не сбрасывается при перезагрузке
+    return HTMLResponse(PARENT_HTML)
 
 
 @app.websocket("/ws/parent/{session_id}")
@@ -606,20 +619,19 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
 
             await websocket.send_text(json.dumps({"type": "typing", "show": True}))
 
-            phase = advance_phase(session)
-            session["phase"] = phase
+            raw_reply = await get_ai_response(session_id, user_text, "active")
+            is_ready = "[ГОТОВО]" in raw_reply
+            bot_reply = raw_reply.replace("[ГОТОВО]", "").strip()
 
-            if phase == "waiting":
-                bot_reply = await get_ai_response(session_id, user_text, phase)
-                await websocket.send_text(json.dumps({"type": "typing", "show": False}))
-                await websocket.send_text(json.dumps({"type": "message", "text": bot_reply}))
-                session["messages"].append({"role": "bot", "text": bot_reply})
+            await websocket.send_text(json.dumps({"type": "typing", "show": False}))
+            await websocket.send_text(json.dumps({"type": "message", "text": bot_reply}))
+            session["messages"].append({"role": "bot", "text": bot_reply})
 
-                # Блокируем ввод — ждём врача
+            if is_ready:
+                # Claude решил что информации достаточно — передаём врачу
                 await websocket.send_text(json.dumps({
                     "type": "status_update",
                     "text": "⏳ Ожидает ответа врача",
-                    "system_msg": "ℹ️ Информация передана доктору. Ожидайте — врач ответит вам в ближайшее время.",
                     "locked": True
                 }))
 
@@ -632,7 +644,7 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
                     "type": "new_case",
                     "session_id": session_id,
                     "label": label,
-                    "preview": user_text[:60],
+                    "preview": bot_reply[:60],
                     "soap": soap,
                     "time": datetime.now().strftime("%H:%M"),
                     "messages": [
@@ -640,11 +652,6 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
                         for m in session["messages"]
                     ],
                 })
-            else:
-                bot_reply = await get_ai_response(session_id, user_text, phase)
-                await websocket.send_text(json.dumps({"type": "typing", "show": False}))
-                await websocket.send_text(json.dumps({"type": "message", "text": bot_reply}))
-                session["messages"].append({"role": "bot", "text": bot_reply})
 
     except WebSocketDisconnect:
         parent_ws.pop(session_id, None)
