@@ -9,12 +9,14 @@ Doc Orchestra — MVP Demo
 import asyncio
 import json
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 # --------------------------------------------------------------------------
 # Загрузка .env
@@ -28,6 +30,7 @@ if _env_path.exists():
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DEMO_MODE = not bool(ANTHROPIC_API_KEY)
+COCKPIT_PASSWORD = os.environ.get("COCKPIT_PASSWORD", "doctor123")
 
 if DEMO_MODE:
     print("\n⚠️  DEMO MODE — ANTHROPIC_API_KEY не найден.")
@@ -120,31 +123,21 @@ def _demo_smart_response(session_id: str, user_message: str, phase: str) -> str:
     if phase == "greeting":
         return DEMO_RESPONSES["greeting"]
 
-    if phase == "complaint":
-        if told_temp and told_rash and told_duration:
-            return "Записал симптомы. Уточните: сыпь бледнеет если нажать пальцем? И ребёнок сейчас активен или вялый?"
-        if told_temp and told_rash:
-            return "Записал. Как давно появились симптомы — несколько часов или с утра?"
-        if told_temp:
-            return "Температура записана. Есть ли какие-то высыпания на коже или слизистых?"
-        if told_rash:
-            return "Сыпь записал. Есть ли у ребёнка температура прямо сейчас?"
-        return DEMO_RESPONSES["complaint"]
-
-    if phase == "details":
-        if not told_weight and not told_age:
-            return "Хорошо. Чтобы врач мог подобрать правильную дозировку — скажите возраст и примерный вес ребёнка?"
-        if not told_weight:
-            return "Почти всё есть. Последнее — примерный вес ребёнка (нужно для расчёта дозы)?"
-        if not told_age:
-            return "Понял. Уточните сколько лет ребёнку?"
+    # Основной диалог (phase == "active") — задаём вопросы пока не соберём нужное
+    # Когда всё есть — возвращаем [ГОТОВО] чтобы кокпит получил запрос
+    if told_temp and told_duration and told_age:
         return (
-            "Отлично, вся информация собрана. "
-            "Передаю доктору — он ответит в ближайшее время. "
-            "Если состояние ухудшится — вызывайте скорую 103."
+            "Записал всё необходимое. "
+            "Передаю информацию врачу — он свяжется с вами в ближайшее время. "
+            "Если состояние ухудшится или появится затруднённое дыхание — вызывайте скорую 103. [ГОТОВО]"
         )
-
-    return DEMO_RESPONSES["waiting"]
+    if not told_temp:
+        return "Есть ли у ребёнка температура прямо сейчас? Если да — какая?"
+    if not told_duration:
+        return "Как давно всё началось? Сколько часов или дней?"
+    if not told_age:
+        return "Сколько лет ребёнку?"
+    return "Есть что-то ещё важное, о чём хотите сообщить врачу?"
 
 
 async def get_ai_response(session_id: str, user_message: str, phase: str) -> str:
@@ -315,6 +308,25 @@ async def notify_cockpit(event: dict):
 # --------------------------------------------------------------------------
 
 app = FastAPI(title="Doc Orchestra MVP")
+
+_security = HTTPBasic()
+
+def require_cockpit_auth(credentials: HTTPBasicCredentials = Depends(_security)):
+    """Минимальная защита кокпита — только врач знает пароль."""
+    ok = secrets.compare_digest(credentials.password.encode(), COCKPIT_PASSWORD.encode())
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный пароль",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials
+
+# Ключевые слова экстренных состояний — проверяем ДО вызова API
+EMERGENCY_WORDS = [
+    "не дышит", "без сознания", "судорог", "синеет", "задыхается",
+    "потерял сознание", "остановилось сердце", "посинел",
+]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -616,6 +628,38 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
 
             user_text = data["text"]
             session["messages"].append({"role": "parent", "text": user_text, "time": datetime.now().isoformat()})
+
+            # Экстренный путь — отвечаем МГНОВЕННО, без вызова Claude API
+            # Работает даже если API недоступен
+            if any(kw in user_text.lower() for kw in EMERGENCY_WORDS):
+                emergency_reply = (
+                    "⚠️ НЕМЕДЛЕННО вызовите скорую — 103!\n\n"
+                    "Пока едет скорая:\n"
+                    "• Уложите ребёнка на бок\n"
+                    "• Не оставляйте одного\n"
+                    "• Расстегните одежду\n\n"
+                    "Врач уже уведомлён."
+                )
+                await websocket.send_text(json.dumps({"type": "message", "text": emergency_reply}))
+                session["messages"].append({"role": "bot", "text": emergency_reply})
+                session["status"] = "waiting_doctor"
+                emergency_soap = f"🚨 ЭКСТРЕННОЕ ОБРАЩЕНИЕ\n\nСообщение родителя: {user_text}\n\nТребуется НЕМЕДЛЕННАЯ связь с семьёй."
+                session["soap"] = emergency_soap
+                await websocket.send_text(json.dumps({
+                    "type": "status_update",
+                    "text": "🚨 Экстренный случай — врач уведомлён",
+                    "locked": True,
+                }))
+                await notify_cockpit({
+                    "type": "new_case",
+                    "session_id": session_id,
+                    "label": "🚨 ЭКСТРЕННО — " + extract_patient_label(session),
+                    "preview": user_text[:60],
+                    "soap": emergency_soap,
+                    "time": datetime.now().strftime("%H:%M"),
+                    "messages": [{"role": m["role"], "text": m["text"]} for m in session["messages"]],
+                })
+                continue  # пропускаем обычный поток
 
             await websocket.send_text(json.dumps({"type": "typing", "show": True}))
 
@@ -1034,7 +1078,7 @@ async def api_sessions():
 
 
 @app.get("/cockpit", response_class=HTMLResponse)
-async def cockpit_page():
+async def cockpit_page(credentials: HTTPBasicCredentials = Depends(require_cockpit_auth)):
     mode = "⚠️ DEMO" if DEMO_MODE else "✅ Claude AI"
     cls = "mode-demo" if DEMO_MODE else "mode-real"
     return HTMLResponse(
