@@ -1,0 +1,12 @@
+.env
+data/patients.db
+data/uploads/*
+!data/uploads/.gitkeep
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
