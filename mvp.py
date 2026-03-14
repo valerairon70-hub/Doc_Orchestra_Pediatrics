@@ -31,6 +31,8 @@ if _env_path.exists():
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DEMO_MODE = not bool(ANTHROPIC_API_KEY)
 COCKPIT_PASSWORD = os.environ.get("COCKPIT_PASSWORD", "doctor123")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+DOCTOR_CHAT_ID = os.environ.get("DOCTOR_CHAT_ID", "")
 
 if DEMO_MODE:
     print("\n⚠️  DEMO MODE — ANTHROPIC_API_KEY не найден.")
@@ -290,6 +292,23 @@ def get_or_create_session(session_id: str) -> dict:
             "created_at": datetime.now().strftime("%H:%M"),
         }
     return sessions[session_id]
+
+
+async def send_telegram_notification(label: str, preview: str, is_emergency: bool = False):
+    """Отправить уведомление врачу в Telegram. Если токен не задан — молча пропускаем."""
+    if not TELEGRAM_BOT_TOKEN or not DOCTOR_CHAT_ID:
+        return
+    import urllib.request
+    import urllib.parse
+    prefix = "🚨 ЭКСТРЕННО" if is_emergency else "🔔 Новый запрос"
+    text = f"{prefix}\n👤 {label}\n\n{preview[:200]}\n\n👉 Откройте кокпит для ответа"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = urllib.parse.urlencode({"chat_id": DOCTOR_CHAT_ID, "text": text}).encode()
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, lambda: urllib.request.urlopen(url, payload, timeout=5))
+    except Exception as e:
+        print(f"⚠️  Telegram уведомление не отправлено: {e}")
 
 
 async def notify_cockpit(event: dict):
@@ -566,6 +585,7 @@ function sendMessage() {
   }
   addMessageRaw(text, 'user', null, true);
   ws.send(JSON.stringify({type: 'message', text: text}));
+  document.getElementById('status-indicator').textContent = '✓ Сообщение получено';
   input.value = '';
   input.style.height = 'auto';
 }
@@ -650,15 +670,19 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
                     "text": "🚨 Экстренный случай — врач уведомлён",
                     "locked": True,
                 }))
+                emergency_label = "🚨 ЭКСТРЕННО — " + extract_patient_label(session)
                 await notify_cockpit({
                     "type": "new_case",
                     "session_id": session_id,
-                    "label": "🚨 ЭКСТРЕННО — " + extract_patient_label(session),
+                    "label": emergency_label,
                     "preview": user_text[:60],
                     "soap": emergency_soap,
                     "time": datetime.now().strftime("%H:%M"),
                     "messages": [{"role": m["role"], "text": m["text"]} for m in session["messages"]],
                 })
+                asyncio.create_task(send_telegram_notification(
+                    emergency_label, user_text[:200], is_emergency=True
+                ))
                 continue  # пропускаем обычный поток
 
             await websocket.send_text(json.dumps({"type": "typing", "show": True}))
@@ -696,6 +720,9 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
                         for m in session["messages"]
                     ],
                 })
+                asyncio.create_task(send_telegram_notification(
+                    label, bot_reply[:200]
+                ))
 
     except WebSocketDisconnect:
         parent_ws.pop(session_id, None)
@@ -787,6 +814,12 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 .reject-form textarea { width: 100%; padding: 10px 12px; background: #1a1a2e; border: 1px solid #ef4444; border-radius: 8px; color: #e0e0e0; font-size: 13px; resize: none; font-family: inherit; outline: none; }
 .reject-form .reject-actions { display: flex; gap: 8px; margin-top: 8px; }
 .btn-reject-confirm { background: #ef4444; color: white; }
+
+/* Шаблоны быстрых ответов */
+.quick-replies { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.btn-quick { padding: 5px 12px; background: #1a1a3a; border: 1px solid #3a3a5a; border-radius: 20px;
+             color: #aaa; font-size: 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+.btn-quick:hover { border-color: #ff6b35; color: #ff6b35; background: #2a1a0a; }
 
 /* Toast */
 .toast { position: fixed; bottom: 24px; right: 24px; background: #1e1e3a; color: white;
@@ -922,6 +955,9 @@ function selectCase(sessionId) {
 
     <div class="card" id="actions-card">
       <div class="draft-label">Ответ родителю</div>
+      <div class="quick-replies">
+        ${QUICK_REPLIES.map(r => `<button class="btn-quick" onclick="applyQuickReply(${JSON.stringify(r.text)})">${r.label}</button>`).join('')}
+      </div>
       <textarea class="draft-edit" id="draft-text" ${isApproved ? 'disabled' : ''}>${escapeHtml(draft)}</textarea>
       <div class="btn-row">
         <button class="btn btn-approve" id="btn-approve" onclick="approveCase('${sessionId}')"
@@ -947,6 +983,20 @@ function selectCase(sessionId) {
       </div>
     </div>
   `;
+}
+
+const QUICK_REPLIES = [
+  { label: '🌡 Жаропонижающее', text: 'При температуре выше 38,5°С дайте парацетамол или ибупрофен по весу ребёнка. Обильное питьё, прохладный воздух в комнате. Если температура держится больше 3 дней или поднимается выше 39,5 — обратитесь снова.' },
+  { label: '📅 Запись на приём', text: 'Рекомендую показаться на очном приёме. Напишите удобное время — запишем.' },
+  { label: '🚑 Вызвать скорую', text: 'Немедленно вызывайте скорую — 103. Не ждите.' },
+  { label: '👀 Наблюдение дома', text: 'Продолжайте наблюдение дома. Обильное питьё, покой. Если состояние ухудшится или появятся новые симптомы — напишите сразу.' },
+  { label: '💊 Антибиотик не нужен', text: 'На данном этапе антибиотик не показан — это вирусная инфекция, она пройдёт сама. Симптоматическое лечение и наблюдение.' },
+  { label: '✅ Всё в норме', text: 'Данные не вызывают опасений — это типичная картина для возраста. Продолжайте обычный режим.' },
+];
+
+function applyQuickReply(text) {
+  const el = document.getElementById('draft-text');
+  if (el && !el.disabled) { el.value = text; el.focus(); }
 }
 
 function switchTab(tab) {
