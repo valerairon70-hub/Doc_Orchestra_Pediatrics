@@ -926,7 +926,9 @@ body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0
 .tab.active { color: #ff6b35; border-bottom-color: #ff6b35; }
 .tab:hover { color: #aaa; }
 
-.soap-content { font-family: 'Menlo', 'Monaco', monospace; font-size: 12.5px; line-height: 1.9; color: #c0c0d0; white-space: pre-wrap; }
+.soap-content { font-family: 'Menlo', 'Monaco', monospace; font-size: 12.5px; line-height: 1.9; color: #c0c0d0; }
+.soap-h1 { font-size: 14px; font-weight: 700; color: #ff6b35; margin: 12px 0 4px; }
+.soap-h2 { font-size: 12.5px; font-weight: 700; color: #e0e0ff; margin: 10px 0 2px; }
 .dialog-content { display: flex; flex-direction: column; gap: 8px; }
 .d-msg { padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; max-width: 85%; }
 .d-msg.parent { background: #1e3a5f; color: #b0cce0; align-self: flex-end; }
@@ -1093,7 +1095,7 @@ function selectCase(sessionId) {
         <div class="tab active" id="tab-soap" onclick="switchTab('soap')">📋 SOAP</div>
         <div class="tab" id="tab-dialog" onclick="switchTab('dialog')">💬 Диалог</div>
       </div>
-      <div id="panel-soap" class="soap-content">${escapeHtml(c.soap || 'Генерация SOAP...')}</div>
+      <div id="panel-soap" class="soap-content">${renderSoap(c.soap || 'Генерация SOAP...')}</div>
       <div id="panel-dialog" style="display:none" class="dialog-content">
         ${renderDialog(c.messages || [])}
       </div>
@@ -1104,7 +1106,7 @@ function selectCase(sessionId) {
         Ответ родителю ${statusBadge}
       </div>
       <div class="quick-replies">
-        ${QUICK_REPLIES.map(r => `<button class="btn-quick" onclick="applyQuickReply(${JSON.stringify(r.text)})">${r.label}</button>`).join('')}
+        ${QUICK_REPLIES.map(r => `<button class="btn-quick" onclick='applyQuickReply(${JSON.stringify(r.text)})'>${r.label}</button>`).join('')}
       </div>
       <textarea class="draft-edit" id="draft-text">${escapeHtml(draft)}</textarea>
       <div class="btn-row">
@@ -1171,15 +1173,44 @@ function renderDialog(messages) {
   }).join('');
 }
 
+function renderSoap(text) {
+  const NL = String.fromCharCode(10);
+  const lines = text.split(NL);
+  return lines.map(line => {
+    const safe = escapeHtml(line);
+    if (safe.startsWith('# ')) return '<div class="soap-h1">' + safe.slice(2) + '</div>';
+    if (safe.startsWith('## ')) return '<div class="soap-h2">' + safe.slice(3) + '</div>';
+    if (safe.startsWith('### ')) return '<div class="soap-h2">' + safe.slice(4) + '</div>';
+    const bold = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    return bold + '<br>';
+  }).join('');
+}
+
 function extractDraft(soap) {
-  // Ищем секцию после "💬 Черновик ответа родителю:" или "Черновик ответа родителю:"
-  const idx = soap.indexOf('Черновик ответа родителю:');
+  // Ищем любой из вариантов заголовка черновика
+  const markers = [
+    'Черновик ответа родителю:',
+    'Рекомендуемый ответ родителю:',
+    'Ответ родителю:',
+    '💬'
+  ];
+  let idx = -1;
+  let markerLen = 0;
+  for (const m of markers) {
+    idx = soap.indexOf(m);
+    if (idx !== -1) { markerLen = m.length; break; }
+  }
   if (idx === -1) return '';
-  let draft = soap.slice(idx + 'Черновик ответа родителю:'.length).trim();
+  let draft = soap.slice(idx + markerLen).trim();
   // Убираем кавычки
   draft = draft.replace(/^[«"']|[»"']$/g, '').trim();
-  // Убираем markdown форматирование (**жирный**, *курсив*)
-  draft = draft.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1');
+  // Убираем markdown построчно
+  const NL2 = String.fromCharCode(10);
+  draft = draft.split(NL2).map(l => {
+    l = l.replace(/^#+\s*/, '');
+    l = l.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1');
+    return l;
+  }).join(NL2).trim();
   return draft;
 }
 
