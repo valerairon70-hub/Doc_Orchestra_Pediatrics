@@ -49,6 +49,7 @@ else:
 # Хранилище в памяти
 # --------------------------------------------------------------------------
 sessions: dict = {}
+appointments: list = []          # записи на приём [{id, session_id, label, date, time, note}]
 cockpit_ws: list = []        # WebSocket-клиенты кокпита (устарело, оставлено для совместимости)
 parent_ws: dict = {}
 _cockpit_sessions: set = set()   # активные сессии кокпита (токены)
@@ -970,6 +971,53 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 /* Keyboard hint */
 .kbd { display: inline-block; background: #2a2a4a; border-radius: 4px; padding: 1px 6px; font-size: 11px; color: #888; font-family: monospace; }
 
+/* Кнопка расписания в шапке */
+.btn-schedule { background: #2a2a4a; border: 1px solid #3a3a5a; color: #ccc; padding: 6px 14px;
+                border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s; }
+.btn-schedule:hover { border-color: #ff6b35; color: #ff6b35; }
+
+/* Модал записи */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 200;
+                 display: flex; align-items: center; justify-content: center; }
+.modal-overlay.hidden { display: none; }
+.modal { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 14px;
+         padding: 28px; width: 360px; max-width: 95vw; }
+.modal h3 { font-size: 16px; font-weight: 700; color: white; margin-bottom: 18px; }
+.modal label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; margin-top: 12px; }
+.modal input { width: 100%; background: #0f0f23; border: 1px solid #2a2a4a; border-radius: 8px;
+               color: #e0e0e0; padding: 9px 12px; font-size: 14px; }
+.modal input:focus { outline: none; border-color: #ff6b35; }
+.modal-btns { display: flex; gap: 10px; margin-top: 20px; }
+.modal-btns button { flex: 1; padding: 10px; border-radius: 8px; border: none;
+                     cursor: pointer; font-size: 13px; font-weight: 700; }
+.btn-modal-ok { background: #22c55e; color: white; }
+.btn-modal-cancel { background: #2a2a4a; color: #888; }
+
+/* Панель расписания */
+.schedule-panel { position: fixed; top: 0; right: -420px; width: 400px; height: 100vh;
+                  background: #0f0f23; border-left: 1px solid #2a2a4a; z-index: 150;
+                  transition: right 0.3s ease; display: flex; flex-direction: column; }
+.schedule-panel.open { right: 0; }
+.schedule-header { padding: 18px 20px; border-bottom: 1px solid #1a1a35;
+                   display: flex; align-items: center; justify-content: space-between; }
+.schedule-header h2 { font-size: 15px; font-weight: 700; color: white; }
+.schedule-close { background: none; border: none; color: #888; cursor: pointer; font-size: 20px; padding: 0; }
+.schedule-body { flex: 1; overflow-y: auto; padding: 16px; }
+.sched-day { margin-bottom: 20px; }
+.sched-day-title { font-size: 11px; font-weight: 700; color: #ff6b35; text-transform: uppercase;
+                   letter-spacing: 1px; margin-bottom: 8px; padding-bottom: 4px;
+                   border-bottom: 1px solid #1a1a35; }
+.sched-item { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 8px;
+              padding: 10px 14px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; }
+.sched-time { font-size: 15px; font-weight: 700; color: #ff6b35; min-width: 48px; }
+.sched-info { flex: 1; }
+.sched-name { font-size: 13px; color: #e0e0e0; font-weight: 600; }
+.sched-note { font-size: 11px; color: #666; margin-top: 2px; }
+.sched-del { background: none; border: none; color: #444; cursor: pointer; font-size: 16px;
+             padding: 0 4px; transition: color 0.15s; }
+.sched-del:hover { color: #ef4444; }
+.sched-empty { text-align: center; color: #444; font-size: 13px; padding: 40px 0; }
+
 @media (max-width: 640px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; height: 140px; }
@@ -988,6 +1036,7 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
   <div class="header-right">
     <span id="ws-status" style="font-size:12px;color:#4caf50;">🟢 Активен</span>
     <span style="font-size:10px;color:#333;" title="Версия сервера">v·SERVER_VERSION_PLACEHOLDER</span>
+    <button class="btn-schedule" onclick="toggleSchedule()">📅 Расписание</button>
     <span class="hint"><span class="kbd">A</span> одобрить &nbsp;<span class="kbd">Esc</span> закрыть</span>
     <span class="mode-badge MODE_CLASS" id="mode-badge">MODE_PLACEHOLDER</span>
   </div>
@@ -1020,6 +1069,35 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Модал: запись на приём -->
+<div class="modal-overlay hidden" id="appt-modal">
+  <div class="modal">
+    <h3>📅 Запись на приём</h3>
+    <div id="appt-patient-line" style="font-size:13px;color:#888;margin-bottom:4px;"></div>
+    <label>Дата</label>
+    <input type="date" id="appt-date">
+    <label>Время</label>
+    <input type="time" id="appt-time" value="10:00">
+    <label>Примечание (необязательно)</label>
+    <input type="text" id="appt-note" placeholder="Повторный осмотр, прививка...">
+    <div class="modal-btns">
+      <button class="btn-modal-ok" onclick="confirmAppointment()">✅ Записать</button>
+      <button class="btn-modal-cancel" onclick="closeApptModal()">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Панель расписания -->
+<div class="schedule-panel" id="schedule-panel">
+  <div class="schedule-header">
+    <h2>📅 Расписание приёмов</h2>
+    <button class="schedule-close" onclick="toggleSchedule()">✕</button>
+  </div>
+  <div class="schedule-body" id="schedule-body">
+    <div class="sched-empty">Нет записей</div>
+  </div>
+</div>
 
 <script>
 let cases = {};
@@ -1106,7 +1184,10 @@ function selectCase(sessionId) {
         Ответ родителю ${statusBadge}
       </div>
       <div class="quick-replies">
-        ${QUICK_REPLIES.map(r => `<button class="btn-quick" onclick='applyQuickReply(${JSON.stringify(r.text)})'>${r.label}</button>`).join('')}
+        ${QUICK_REPLIES.map(r => r.isAppt
+          ? `<button class="btn-quick" onclick='openApptModal(${JSON.stringify(sessionId)})'>${r.label}</button>`
+          : `<button class="btn-quick" onclick='applyQuickReply(${JSON.stringify(r.text)})'>${r.label}</button>`
+        ).join('')}
       </div>
       <textarea class="draft-edit" id="draft-text">${escapeHtml(draft)}</textarea>
       <div class="btn-row">
@@ -1136,7 +1217,7 @@ function selectCase(sessionId) {
 
 const QUICK_REPLIES = [
   { label: '🌡 Жаропонижающее', text: 'При температуре выше 38,5°С дайте парацетамол или ибупрофен по весу ребёнка. Обильное питьё, прохладный воздух в комнате. Если температура держится больше 3 дней или поднимается выше 39,5 — обратитесь снова.' },
-  { label: '📅 Запись на приём', text: 'Рекомендую показаться на очном приёме. Напишите удобное время — запишем.' },
+  { label: '📅 Запись на приём', isAppt: true, text: '' },
   { label: '🚑 Вызвать скорую', text: 'Немедленно вызывайте скорую — 103. Не ждите.' },
   { label: '👀 Наблюдение дома', text: 'Продолжайте наблюдение дома. Обильное питьё, покой. Если состояние ухудшится или появятся новые симптомы — напишите сразу.' },
   { label: '💊 Антибиотик не нужен', text: 'На данном этапе антибиотик не показан — это вирусная инфекция, она пройдёт сама. Симптоматическое лечение и наблюдение.' },
@@ -1335,6 +1416,112 @@ connect();
 window.addEventListener('pageshow', (e) => {
   if (e.persisted) location.reload();
 });
+
+// ─── Запись на приём ──────────────────────────────────────────────────────
+
+function openApptModal(sessionId) {
+  const c = cases[sessionId];
+  const labelEl = document.getElementById('appt-patient-line');
+  if (labelEl) labelEl.textContent = c ? c.label : '';
+  // Дата по умолчанию — завтра
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const iso = tomorrow.toISOString().slice(0, 10);
+  document.getElementById('appt-date').value = iso;
+  document.getElementById('appt-time').value = '10:00';
+  document.getElementById('appt-note').value = '';
+  document.getElementById('appt-modal').dataset.sid = sessionId || '';
+  document.getElementById('appt-modal').classList.remove('hidden');
+}
+
+function closeApptModal() {
+  document.getElementById('appt-modal').classList.add('hidden');
+}
+
+function confirmAppointment() {
+  const sid = document.getElementById('appt-modal').dataset.sid;
+  const date = document.getElementById('appt-date').value;
+  const time = document.getElementById('appt-time').value;
+  const note = document.getElementById('appt-note').value.trim();
+  if (!date || !time) { showToast('⚠️ Выберите дату и время'); return; }
+  const label = (cases[sid] && cases[sid].label) || 'Пациент';
+  fetch('/api/appointment', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sid, label, date, time, note})
+  }).then(r => r.json()).then(res => {
+    if (!res.ok) { showToast('⚠️ Ошибка сохранения'); return; }
+    closeApptModal();
+    // Заполняем черновик ответа родителю
+    const dateStr = formatDateRu(date);
+    const draftText = 'Записываю вас на приём: ' + dateStr + ' в ' + time + '.' +
+      (note ? ' ' + note + '.' : '') + ' Врач будет вас ждать. Если планы изменятся — напишите заранее.';
+    const ta = document.getElementById('draft-text');
+    if (ta) { ta.value = draftText; ta.focus(); }
+    showToast('✅ Запись сохранена: ' + dateStr + ' ' + time);
+    renderSchedule();
+  }).catch(() => showToast('⚠️ Нет связи'));
+}
+
+function formatDateRu(iso) {
+  const d = new Date(iso + 'T12:00:00');
+  const months = ['января','февраля','марта','апреля','мая','июня',
+                  'июля','августа','сентября','октября','ноября','декабря'];
+  const days = ['вс','пн','вт','ср','чт','пт','сб'];
+  return d.getDate() + ' ' + months[d.getMonth()] + ' (' + days[d.getDay()] + ')';
+}
+
+// ─── Панель расписания ────────────────────────────────────────────────────
+
+function toggleSchedule() {
+  const panel = document.getElementById('schedule-panel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) renderSchedule();
+}
+
+function renderSchedule() {
+  fetch('/api/appointments').then(r => r.json()).then(list => {
+    const body = document.getElementById('schedule-body');
+    if (!list.length) {
+      body.innerHTML = '<div class="sched-empty">Нет записей на приём</div>';
+      return;
+    }
+    // Группируем по дате
+    const byDate = {};
+    list.forEach(a => {
+      if (!byDate[a.date]) byDate[a.date] = [];
+      byDate[a.date].push(a);
+    });
+    const today = new Date().toISOString().slice(0, 10);
+    body.innerHTML = Object.keys(byDate).sort().map(date => {
+      const isToday = date === today;
+      const label = isToday ? 'Сегодня' : formatDateRu(date);
+      const items = byDate[date].map(a => `
+        <div class="sched-item">
+          <div class="sched-time">${a.time}</div>
+          <div class="sched-info">
+            <div class="sched-name">${escapeHtml(a.label)}</div>
+            ${a.note ? '<div class="sched-note">' + escapeHtml(a.note) + '</div>' : ''}
+          </div>
+          <button class="sched-del" onclick="deleteAppt('${a.id}')" title="Удалить">✕</button>
+        </div>`).join('');
+      return `<div class="sched-day">
+        <div class="sched-day-title">${label}</div>
+        ${items}
+      </div>`;
+    }).join('');
+  }).catch(() => {});
+}
+
+function deleteAppt(id) {
+  fetch('/api/appointment/' + id, {method: 'DELETE'})
+    .then(r => r.json()).then(() => { renderSchedule(); showToast('Запись удалена'); });
+}
+
+// Закрываем модал по клику вне него
+document.getElementById('appt-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeApptModal();
+});
 </script>
 </body></html>"""
 
@@ -1469,6 +1656,41 @@ async def api_reject(request: Request):
         return Response("Not found", status_code=404)
     sessions[sid]["status"] = "rejected"
     await notify_cockpit({"type": "case_update", "session_id": sid, "status": "rejected"})
+    return {"ok": True}
+
+
+@app.post("/api/appointment")
+async def api_appointment(request: Request):
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    data = await request.json()
+    appt = {
+        "id": secrets.token_hex(6),
+        "session_id": data.get("session_id", ""),
+        "label": data.get("label", "Пациент"),
+        "date": data.get("date", ""),
+        "time": data.get("time", ""),
+        "note": data.get("note", ""),
+    }
+    appointments.append(appt)
+    appointments.sort(key=lambda a: (a["date"], a["time"]))
+    return {"ok": True, "id": appt["id"]}
+
+
+@app.get("/api/appointments")
+async def api_appointments(request: Request):
+    from fastapi.responses import JSONResponse
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    return JSONResponse(appointments)
+
+
+@app.delete("/api/appointment/{appt_id}")
+async def api_delete_appointment(appt_id: str, request: Request):
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    global appointments
+    appointments = [a for a in appointments if a["id"] != appt_id]
     return {"ok": True}
 
 
