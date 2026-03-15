@@ -10,13 +10,15 @@ import asyncio
 import json
 import os
 import secrets
+import time
 from datetime import datetime
 from pathlib import Path
 
+SERVER_START = int(time.time())  # уникальная версия — меняется при каждом запуске
+
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 
 # --------------------------------------------------------------------------
 # Загрузка .env
@@ -34,6 +36,9 @@ COCKPIT_PASSWORD = os.environ.get("COCKPIT_PASSWORD", "doctor123")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DOCTOR_CHAT_ID = os.environ.get("DOCTOR_CHAT_ID", "")
 DOCTOR_NAME = os.environ.get("DOCTOR_NAME", "врача")
+WORK_START = int(os.environ.get("WORK_START", "9"))   # рабочий день с 9:00
+WORK_END = int(os.environ.get("WORK_END", "20"))       # рабочий день до 20:00
+REMINDER_TIMEOUT_MIN = int(os.environ.get("REMINDER_TIMEOUT_MIN", "30"))  # напоминание через 30 мин
 
 if DEMO_MODE:
     print("\n⚠️  DEMO MODE — ANTHROPIC_API_KEY не найден.")
@@ -44,8 +49,10 @@ else:
 # Хранилище в памяти
 # --------------------------------------------------------------------------
 sessions: dict = {}
-cockpit_ws: list = []
+cockpit_ws: list = []        # WebSocket-клиенты кокпита (устарело, оставлено для совместимости)
 parent_ws: dict = {}
+_cockpit_sessions: set = set()   # активные сессии кокпита (токены)
+sse_queues: list = []            # SSE-очереди кокпита (основной канал событий)
 
 # --------------------------------------------------------------------------
 # ИИ
@@ -314,34 +321,132 @@ async def send_telegram_notification(label: str, preview: str, is_emergency: boo
 
 
 async def notify_cockpit(event: dict):
+    msg = json.dumps(event, ensure_ascii=False)
+    # SSE (основной канал — работает в Safari)
+    for q in list(sse_queues):
+        try:
+            await q.put(msg)
+        except Exception:
+            pass
+    # WebSocket (оставлен для совместимости)
     dead = []
     for ws in cockpit_ws:
         try:
-            await ws.send_text(json.dumps(event, ensure_ascii=False))
+            await ws.send_text(msg)
         except Exception:
             dead.append(ws)
     for ws in dead:
         cockpit_ws.remove(ws)
 
 
+def is_working_hours() -> bool:
+    """Проверить: сейчас рабочие часы врача?"""
+    h = datetime.now().hour
+    return WORK_START <= h < WORK_END
+
+
+def get_offhours_message() -> str:
+    """Сообщение для родителя в нерабочее время."""
+    h = datetime.now().hour
+    if h >= 20:
+        return f"🌙 Сейчас поздний вечер, {DOCTOR_NAME} уже не на приёме. Ваше сообщение принято — он ответит завтра утром до 9:00. Если что-то срочное — вызовите скорую 103."
+    else:
+        return f"🌙 Сейчас ночное время, {DOCTOR_NAME} отдыхает. Ваше сообщение принято — он ответит утром до 9:00. Если что-то срочное — вызовите скорую 103."
+
+
 # --------------------------------------------------------------------------
 # FastAPI app
 # --------------------------------------------------------------------------
 
-app = FastAPI(title="Doc Orchestra MVP")
+from contextlib import asynccontextmanager
 
-_security = HTTPBasic()
 
-def require_cockpit_auth(credentials: HTTPBasicCredentials = Depends(_security)):
-    """Минимальная защита кокпита — только врач знает пароль."""
-    ok = secrets.compare_digest(credentials.password.encode(), COCKPIT_PASSWORD.encode())
-    if not ok:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный пароль",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials
+async def reminder_loop():
+    """Фоновая задача: каждые 5 мин проверяем не одобренные запросы.
+    Если ждут дольше REMINDER_TIMEOUT_MIN — отправляем Telegram-напоминание."""
+    reminded: dict = {}  # session_id → время последнего напоминания
+    while True:
+        await asyncio.sleep(300)  # проверяем каждые 5 минут
+        now_ts = datetime.now()
+        for sid, s in list(sessions.items()):
+            if s.get("status") != "waiting_doctor":
+                continue
+            created_str = s.get("created_at", "")
+            if not created_str:
+                continue
+            try:
+                # created_at хранится в формате "%H:%M" — восстанавливаем как сегодняшнюю дату
+                created_time = datetime.strptime(created_str, "%H:%M").replace(
+                    year=now_ts.year, month=now_ts.month, day=now_ts.day
+                )
+            except ValueError:
+                continue
+            wait_min = (now_ts - created_time).total_seconds() / 60
+            last_reminded = reminded.get(sid, 0)
+            # Напоминаем если: ждёт дольше порога И ещё не напоминали (или прошло ещё раз столько же)
+            if wait_min >= REMINDER_TIMEOUT_MIN and (last_reminded == 0 or wait_min >= last_reminded + REMINDER_TIMEOUT_MIN):
+                reminded[sid] = wait_min
+                label = extract_patient_label(s)
+                text = f"⏰ Запрос ожидает одобрения уже {int(wait_min)} мин.\n👤 {label}\n\nОткройте кокпит чтобы ответить."
+                print(f"⏰ Напоминание врачу: {label}, ждёт {int(wait_min)} мин")
+                asyncio.create_task(send_telegram_notification(label, text))
+
+
+@asynccontextmanager
+async def lifespan(app):
+    asyncio.create_task(reminder_loop())
+    yield
+
+
+app = FastAPI(title="Doc Orchestra MVP", lifespan=lifespan)
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Вход — Кокпит врача</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0;
+       min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: #16213e; border: 1px solid #2a2a4a; border-radius: 16px;
+        padding: 40px 36px; width: 100%; max-width: 360px; }
+h1 { font-size: 22px; margin-bottom: 4px; }
+.sub { color: #888; font-size: 14px; margin-bottom: 32px; }
+label { display: block; font-size: 13px; color: #aaa; margin-bottom: 6px; }
+input { width: 100%; padding: 12px 14px; background: #1a1a2e; border: 1px solid #3a3a5a;
+        border-radius: 8px; color: #e0e0e0; font-size: 15px; outline: none;
+        transition: border-color 0.15s; }
+input:focus { border-color: #ff6b35; }
+.field { margin-bottom: 20px; }
+button { width: 100%; padding: 13px; background: #ff6b35; color: white; border: none;
+         border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer;
+         transition: opacity 0.15s; }
+button:hover { opacity: 0.9; }
+.error { color: #ff4444; font-size: 13px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🩺 Кокпит врача</h1>
+  <p class="sub">Doc Orchestra</p>
+  ERROR_PLACEHOLDER
+  <form method="POST" action="/login">
+    <div class="field">
+      <label>Пароль</label>
+      <input type="password" name="password" placeholder="Введите пароль" autofocus>
+    </div>
+    <button type="submit">Войти</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
+def _check_session(request: Request) -> bool:
+    token = request.cookies.get("cockpit_session")
+    return token in _cockpit_sessions if token else False
 
 # Ключевые слова экстренных состояний — проверяем ДО вызова API
 EMERGENCY_WORDS = [
@@ -443,7 +548,10 @@ button#sendBtn:disabled { background: #ccc; cursor: default; }
 <div class="messages" id="messages"></div>
 
 <div class="waiting-banner" id="waiting-banner">
-  ⏳ Информация передана доктору — ожидайте ответа. При ухудшении — 📞 103
+  <span id="waiting-text">⏳ Информация передана доктору — ожидайте ответа.</span>
+  &nbsp;·&nbsp; При ухудшении — 📞 103
+  &nbsp;·&nbsp;
+  <button onclick="newChat()" style="background:none;border:none;color:#795548;text-decoration:underline;cursor:pointer;font-size:13px;padding:0;">Новый чат</button>
 </div>
 
 <div class="input-area">
@@ -490,6 +598,17 @@ function saveToStorage(text, role) {
   } catch(e) {}
 }
 
+function getWaitingText() {
+  const h = new Date().getHours();
+  if (h >= 9 && h < 20) {
+    return '⏳ Передано врачу — ответит в течение часа.';
+  } else if (h >= 20 && h < 23) {
+    return '🌙 Поздний вечер — врач ответит завтра до 9:00.';
+  } else {
+    return '🌙 Ночное время — врач ответит утром до 9:00.';
+  }
+}
+
 function setLocked(val) {
   locked = val;
   const inp = document.getElementById('input');
@@ -499,6 +618,8 @@ function setLocked(val) {
   btn.disabled = val;
   if (val) {
     banner.classList.add('show');
+    const wtEl = document.getElementById('waiting-text');
+    if (wtEl) wtEl.textContent = getWaitingText();
     document.getElementById('status-indicator').textContent = '⏳ Ожидает ответа врача';
     inp.placeholder = 'Ожидайте ответа врача...';
   }
@@ -592,6 +713,12 @@ function sendMessage() {
   input.style.height = 'auto';
 }
 
+function newChat() {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(_PERSIST_KEY);
+  location.reload();
+}
+
 // При загрузке страницы
 const hadHistory = restoreHistory();
 connect();
@@ -623,6 +750,12 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
             await websocket.send_text(json.dumps({"type": "typing", "show": False}))
             await websocket.send_text(json.dumps({"type": "message", "text": greeting}))
             session["messages"].append({"role": "bot", "text": greeting, "time": datetime.now().isoformat()})
+            # Автоответ о нерабочем времени — только при первом подключении
+            if not is_working_hours():
+                await asyncio.sleep(0.8)
+                offhours_msg = get_offhours_message()
+                await websocket.send_text(json.dumps({"type": "message", "text": offhours_msg}))
+                session["messages"].append({"role": "bot", "text": offhours_msg, "time": datetime.now().isoformat()})
 
     asyncio.create_task(send_greeting())
 
@@ -739,6 +872,9 @@ COCKPIT_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Doc Orchestra — Кокпит врача</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -848,6 +984,8 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
     <span class="badge" id="count-badge" style="display:none">0</span>
   </div>
   <div class="header-right">
+    <span id="ws-status" style="font-size:12px;color:#4caf50;">🟢 Активен</span>
+    <span style="font-size:10px;color:#333;" title="Версия сервера">v·SERVER_VERSION_PLACEHOLDER</span>
     <span class="hint"><span class="kbd">A</span> одобрить &nbsp;<span class="kbd">Esc</span> закрыть</span>
     <span class="mode-badge MODE_CLASS" id="mode-badge">MODE_PLACEHOLDER</span>
   </div>
@@ -855,9 +993,12 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 
 <div class="layout">
   <div class="sidebar">
-    <div class="sidebar-header" style="display:flex;align-items:center;justify-content:space-between;">
-      Очередь
-      <button onclick="reloadSessions()" style="background:none;border:none;color:#ff6b35;cursor:pointer;font-size:13px;padding:0;" title="Обновить список">↺ обновить</button>
+    <div class="sidebar-header" style="display:flex;align-items:center;justify-content:space-between;flex-direction:column;align-items:flex-start;gap:4px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;width:100%;">
+        Очередь
+        <button onclick="reloadSessions()" style="background:none;border:none;color:#ff6b35;cursor:pointer;font-size:13px;padding:0;" title="Обновить список">↺ обновить</button>
+      </div>
+      <div id="poll-status" style="font-size:10px;color:#444;font-weight:400;text-transform:none;letter-spacing:0;">Загрузка...</div>
     </div>
     <div class="case-list" id="case-list">
       <div class="empty-sidebar">
@@ -879,20 +1020,17 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 <div class="toast" id="toast"></div>
 
 <script>
-let ws;
 let cases = {};
 let activeSession = null;
 let activeTab = 'soap';
 
-function connect() {
-  ws = new WebSocket('ws://' + location.host + '/ws/cockpit');
-  ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    if (data.type === 'new_case') handleNewCase(data);
-    else if (data.type === 'init') data.cases.forEach(c => handleNewCase(c, false));
-  };
-  ws.onclose = () => setTimeout(connect, 2500);
+// REST polling — каждые 3 секунды
+function startPolling() {
+  reloadSessions();
+  setInterval(reloadSessions, 3000);
 }
+
+function connect() { startPolling(); }
 
 function handleNewCase(data, notify = true) {
   cases[data.session_id] = data;
@@ -941,7 +1079,13 @@ function selectCase(sessionId) {
   if (!c) return;
 
   const draft = extractDraft(c.soap || '');
-  const isApproved = c.status === 'approved' || c.status === 'rejected';
+  const isApproved = c.status === 'approved';
+  const isRejected = c.status === 'rejected';
+  const statusBadge = isApproved
+    ? '<span style="color:#4caf50;font-size:12px;font-weight:600;">✅ Отправлен</span>'
+    : isRejected
+    ? '<span style="color:#ef4444;font-size:12px;font-weight:600;">✗ Отклонён</span>'
+    : '';
 
   document.getElementById('main-content').innerHTML = `
     <div class="card">
@@ -956,20 +1100,21 @@ function selectCase(sessionId) {
     </div>
 
     <div class="card" id="actions-card">
-      <div class="draft-label">Ответ родителю</div>
+      <div class="draft-label" style="display:flex;align-items:center;gap:8px;">
+        Ответ родителю ${statusBadge}
+      </div>
       <div class="quick-replies">
         ${QUICK_REPLIES.map(r => `<button class="btn-quick" onclick="applyQuickReply(${JSON.stringify(r.text)})">${r.label}</button>`).join('')}
       </div>
-      <textarea class="draft-edit" id="draft-text" ${isApproved ? 'disabled' : ''}>${escapeHtml(draft)}</textarea>
+      <textarea class="draft-edit" id="draft-text">${escapeHtml(draft)}</textarea>
       <div class="btn-row">
-        <button class="btn btn-approve" id="btn-approve" onclick="approveCase('${sessionId}')"
-          ${isApproved ? 'disabled' : ''} title="Клавиша A">
-          ✅ Одобрить и отправить
+        <button class="btn btn-approve" id="btn-approve" onclick="approveCase('${sessionId}')" title="Клавиша A">
+          ✅ ${isApproved ? 'Отправить ещё раз' : 'Одобрить и отправить'}
         </button>
-        <button class="btn btn-edit" onclick="focusDraft()" ${isApproved ? 'disabled' : ''}>
+        <button class="btn btn-edit" onclick="focusDraft()">
           ✏️ Редактировать
         </button>
-        <button class="btn btn-reject" onclick="toggleRejectForm()" ${isApproved ? 'disabled' : ''}>
+        <button class="btn btn-reject" onclick="toggleRejectForm()">
           ✗ Отклонить
         </button>
         <button class="btn btn-archive" onclick="archiveCase('${sessionId}')">
@@ -998,7 +1143,12 @@ const QUICK_REPLIES = [
 
 function applyQuickReply(text) {
   const el = document.getElementById('draft-text');
-  if (el && !el.disabled) { el.value = text; el.focus(); }
+  if (!el) return;
+  el.disabled = false;
+  el.value = text;
+  el.focus();
+  const btn = document.getElementById('btn-approve');
+  if (btn) btn.disabled = false;
 }
 
 function switchTab(tab) {
@@ -1016,7 +1166,7 @@ function renderDialog(messages) {
     const roleLabel = isParent ? 'Родитель' : 'Ассистент';
     return `<div class="d-msg ${isParent ? 'parent' : 'bot'}">
       <div class="role">${roleLabel}</div>
-      ${escapeHtml(m.text).replace(/\n/g, '<br>')}
+      ${escapeHtml(m.text).split('\\n').join('<br>')}
     </div>`;
   }).join('');
 }
@@ -1026,8 +1176,10 @@ function extractDraft(soap) {
   const idx = soap.indexOf('Черновик ответа родителю:');
   if (idx === -1) return '';
   let draft = soap.slice(idx + 'Черновик ответа родителю:'.length).trim();
-  // Убираем кавычки и лишние пробелы
+  // Убираем кавычки
   draft = draft.replace(/^[«"']|[»"']$/g, '').trim();
+  // Убираем markdown форматирование (**жирный**, *курсив*)
+  draft = draft.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1');
   return draft;
 }
 
@@ -1044,20 +1196,32 @@ function toggleRejectForm() {
 function approveCase(sessionId) {
   const draft = document.getElementById('draft-text')?.value?.trim() || '';
   if (!draft) { showToast('⚠️ Напишите ответ родителю перед отправкой'); focusDraft(); return; }
-  ws.send(JSON.stringify({ type: 'approve', session_id: sessionId, message: draft }));
-  if (cases[sessionId]) cases[sessionId].status = 'approved';
-  renderSidebar();
-  selectCase(sessionId);
-  showToast('✅ Ответ отправлен родителю');
+  fetch('/api/approve', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId, message: draft})
+  }).then(r => {
+    if (!r.ok) { showToast('⚠️ Ошибка отправки: ' + r.status); return; }
+    if (cases[sessionId]) cases[sessionId].status = 'approved';
+    renderSidebar();
+    selectCase(sessionId);
+    showToast('✅ Ответ отправлен родителю');
+  }).catch(() => showToast('⚠️ Нет связи с сервером'));
 }
 
 function rejectCase(sessionId) {
   const reason = document.getElementById('reject-reason')?.value?.trim() || '';
-  ws.send(JSON.stringify({ type: 'reject', session_id: sessionId, reason }));
-  if (cases[sessionId]) cases[sessionId].status = 'rejected';
-  renderSidebar();
-  selectCase(sessionId);
-  showToast('✗ Кейс отклонён');
+  fetch('/api/reject', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId, reason})
+  }).then(r => {
+    if (!r.ok) { showToast('⚠️ Ошибка: ' + r.status); return; }
+    if (cases[sessionId]) cases[sessionId].status = 'rejected';
+    renderSidebar();
+    selectCase(sessionId);
+    showToast('✗ Кейс отклонён');
+  }).catch(() => showToast('⚠️ Нет связи с сервером'));
 }
 
 function archiveCase(sessionId) {
@@ -1095,16 +1259,51 @@ function escapeHtml(s) {
 }
 
 function reloadSessions() {
-  fetch('/api/sessions').then(r => r.json()).then(list => {
-    list.forEach(c => handleNewCase(c, false));
-    if (list.length === 0) showToast('Нет активных запросов');
-    else showToast('Загружено: ' + list.length + ' запрос(ов)');
-  });
+  const pollEl = document.getElementById('poll-status');
+  const statusEl = document.getElementById('ws-status');
+  fetch('/api/sessions?t=' + Date.now())
+    .then(r => {
+      if (!r.ok) {
+        if (pollEl) pollEl.textContent = '⚠️ Сервер ' + r.status;
+        if (statusEl) { statusEl.textContent = '🔴 Ошибка ' + r.status; statusEl.style.color = '#f44336'; }
+        return null;
+      }
+      if (statusEl) { statusEl.textContent = '🟢 Активен'; statusEl.style.color = '#4caf50'; }
+      return r.json();
+    })
+    .then(list => {
+      if (!list) return;
+      const t = new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+      // Считаем новые сессии (которых ещё нет в cases)
+      let newCount = 0;
+      list.forEach(c => {
+        const isNew = !cases[c.session_id];
+        // Всегда обновляем данные (статус мог измениться)
+        cases[c.session_id] = c;
+        if (isNew) {
+          newCount++;
+          renderSidebar();
+          if (!activeSession) selectCase(c.session_id);
+        }
+      });
+      // Обновляем статусы существующих
+      renderSidebar();
+      const total = Object.values(cases).filter(c => c.status !== 'archived').length;
+      if (pollEl) pollEl.textContent = t + (total > 0 ? ' · ' + total + ' запр.' : ' · пусто');
+      if (newCount > 0) showToast('🔔 Новых запросов: ' + newCount);
+    })
+    .catch(() => {
+      if (pollEl) pollEl.textContent = '⚠️ Нет связи';
+      if (statusEl) { statusEl.textContent = '🔴 Нет связи'; statusEl.style.color = '#f44336'; }
+    });
 }
 
 connect();
-// При загрузке — подгрузить через REST (страховка если WS ещё не подключился)
-setTimeout(reloadSessions, 1500);
+
+// BFCache: если Safari вернул страницу из кеша — принудительно перезагружаем
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) location.reload();
+});
 </script>
 </body></html>"""
 
@@ -1129,15 +1328,134 @@ async def api_sessions():
     return JSONResponse(result)
 
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if _check_session(request):
+        return RedirectResponse("/cockpit", status_code=302)
+    return HTMLResponse(_LOGIN_HTML.replace("ERROR_PLACEHOLDER", ""))
+
+
+@app.post("/login")
+async def login_submit(request: Request, response: Response, password: str = Form(...)):
+    ok = secrets.compare_digest(password.encode(), COCKPIT_PASSWORD.encode())
+    if not ok:
+        error = '<p class="error">Неверный пароль. Попробуйте ещё раз.</p>'
+        return HTMLResponse(_LOGIN_HTML.replace("ERROR_PLACEHOLDER", error))
+    token = secrets.token_urlsafe(32)
+    _cockpit_sessions.add(token)
+    # ?v= гарантирует что Safari не возьмёт кокпит из кеша
+    resp = RedirectResponse(f"/cockpit?v={SERVER_START}", status_code=302)
+    resp.set_cookie("cockpit_session", token, httponly=True, samesite="lax")
+    return resp
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    token = request.cookies.get("cockpit_session")
+    _cockpit_sessions.discard(token)
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie("cockpit_session")
+    return resp
+
+
+@app.get("/api/events")
+async def sse_events(request: Request):
+    """SSE-поток для кокпита врача. Работает в Safari (в отличие от WebSocket)."""
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    sse_queues.append(queue)
+
+    # Текущие сессии — отправляем сразу при подключении
+    existing = []
+    for sid, s in sessions.items():
+        if s.get("status") in ("waiting_doctor", "approved", "rejected"):
+            existing.append({
+                "type": "new_case",
+                "session_id": sid,
+                "label": extract_patient_label(s),
+                "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
+                "soap": s.get("soap"),
+                "time": s.get("created_at", ""),
+                "status": s.get("status"),
+                "messages": [{"role": m["role"], "text": m["text"]} for m in s.get("messages", [])],
+            })
+
+    async def generator():
+        try:
+            # Сразу шлём все текущие кейсы
+            if existing:
+                yield f"data: {json.dumps({'type': 'init', 'cases': existing}, ensure_ascii=False)}\n\n"
+            # Слушаем очередь
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=25)
+                    yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"  # не даём браузеру закрыть соединение
+        finally:
+            if queue in sse_queues:
+                sse_queues.remove(queue)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/approve")
+async def api_approve(request: Request):
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    data = await request.json()
+    sid = data.get("session_id", "")
+    approved_msg = data.get("message", "")
+    if sid not in sessions:
+        return Response("Not found", status_code=404)
+    sessions[sid]["status"] = "approved"
+    sessions[sid]["messages"].append({"role": "doctor", "text": approved_msg, "time": datetime.now().isoformat()})
+    parent_socket = parent_ws.get(sid)
+    if parent_socket:
+        try:
+            await parent_socket.send_text(json.dumps({"type": "doctor_reply", "text": f"👨‍⚕️ {approved_msg}"}))
+        except Exception:
+            pass
+    await notify_cockpit({"type": "case_update", "session_id": sid, "status": "approved"})
+    return {"ok": True}
+
+
+@app.post("/api/reject")
+async def api_reject(request: Request):
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    data = await request.json()
+    sid = data.get("session_id", "")
+    if sid not in sessions:
+        return Response("Not found", status_code=404)
+    sessions[sid]["status"] = "rejected"
+    await notify_cockpit({"type": "case_update", "session_id": sid, "status": "rejected"})
+    return {"ok": True}
+
+
 @app.get("/cockpit", response_class=HTMLResponse)
-async def cockpit_page(credentials: HTTPBasicCredentials = Depends(require_cockpit_auth)):
+async def cockpit_page(request: Request):
+    if not _check_session(request):
+        return RedirectResponse("/login", status_code=302)
     mode = "⚠️ DEMO" if DEMO_MODE else "✅ Claude AI"
     cls = "mode-demo" if DEMO_MODE else "mode-real"
-    return HTMLResponse(
-        COCKPIT_HTML
-        .replace("MODE_PLACEHOLDER", mode)
-        .replace("MODE_CLASS", cls)
-    )
+    html = (COCKPIT_HTML
+            .replace("MODE_PLACEHOLDER", mode)
+            .replace("MODE_CLASS", cls)
+            .replace("SERVER_VERSION_PLACEHOLDER", str(SERVER_START)))
+    return HTMLResponse(html, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 
 @app.websocket("/ws/cockpit")
@@ -1173,6 +1491,7 @@ async def cockpit_websocket(websocket: WebSocket):
                 approved_msg = data.get("message", "")
                 if sid in sessions:
                     sessions[sid]["status"] = "approved"
+                    sessions[sid]["messages"].append({"role": "doctor", "text": approved_msg, "time": datetime.now().isoformat()})
                     parent_socket = parent_ws.get(sid)
                     if parent_socket:
                         try:
@@ -1182,11 +1501,13 @@ async def cockpit_websocket(websocket: WebSocket):
                             }))
                         except Exception:
                             pass
+                    await notify_cockpit({"type": "case_update", "session_id": sid, "status": "approved"})
 
             elif data.get("type") == "reject":
                 sid = data["session_id"]
                 if sid in sessions:
                     sessions[sid]["status"] = "rejected"
+                    await notify_cockpit({"type": "case_update", "session_id": sid, "status": "rejected"})
 
     except WebSocketDisconnect:
         if websocket in cockpit_ws:
