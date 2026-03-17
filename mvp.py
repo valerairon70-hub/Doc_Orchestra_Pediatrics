@@ -1037,9 +1037,9 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
                       vertical-align: top; padding: 2px 2px; min-height: 42px; }
 .cal-table tbody td.today-col { background: rgba(255,107,53,0.04); }
 .cal-time-cell { text-align: right; padding: 2px 6px 2px 3px !important; font-size: 10px;
-                 color: #2a2a4a; font-weight: 700; white-space: nowrap; width: 38px;
+                 color: #6b6b9a; font-weight: 700; white-space: nowrap; width: 38px;
                  vertical-align: middle; background: #08080f;
-                 border-right: 2px solid #1a1a35 !important; }
+                 border-right: 2px solid #2a2a4a !important; }
 .cal-appt { background: #1b3a5c; border-left: 3px solid #4a9eff; border-radius: 4px;
             padding: 3px 5px; margin: 2px 1px; overflow: hidden; }
 .cal-appt-del { float: right; background: none; border: none; color: #2a4060;
