@@ -921,7 +921,7 @@ body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0
 .card { background: #0f0f23; border: 1px solid #2a2a4a; border-radius: 12px; padding: 20px; }
 .card-title { font-size: 13px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
 
-/* Tabs: SOAP / Диалог */
+/* Tabs: SOAP / Диалог / Анализы */
 .tabs { display: flex; gap: 0; border-bottom: 1px solid #2a2a4a; margin-bottom: 16px; }
 .tab { padding: 8px 18px; font-size: 13px; font-weight: 600; color: #555; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
 .tab.active { color: #ff6b35; border-bottom-color: #ff6b35; }
@@ -931,6 +931,19 @@ body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #e0e0
 .soap-h1 { font-size: 14px; font-weight: 700; color: #ff6b35; margin: 12px 0 4px; }
 .soap-h2 { font-size: 12.5px; font-weight: 700; color: #e0e0ff; margin: 10px 0 2px; }
 .dialog-content { display: flex; flex-direction: column; gap: 8px; }
+
+/* Анализы */
+.analyze-panel { display: flex; flex-direction: column; gap: 12px; }
+.analyze-input { background: #0a0a1a; border: 1px solid #2a2a4a; border-radius: 8px; color: #c0c0d0; font-family: 'Menlo','Monaco',monospace; font-size: 12.5px; line-height: 1.7; padding: 10px 12px; resize: vertical; min-height: 120px; width: 100%; box-sizing: border-box; }
+.analyze-input:focus { outline: none; border-color: #ff6b35; }
+.analyze-input::placeholder { color: #444; }
+.analyze-result { background: #0a0a1a; border: 1px solid #2a2a4a; border-radius: 8px; padding: 14px; min-height: 80px; font-size: 13px; line-height: 1.7; color: #c0c0d0; white-space: pre-wrap; }
+.analyze-result .ar-section { margin-bottom: 12px; }
+.analyze-result .ar-title { font-size: 13px; font-weight: 700; color: #ff6b35; margin-bottom: 4px; }
+.analyze-result .ar-normal { color: #6dbf7e; }
+.analyze-result .ar-warn { color: #f0b429; }
+.analyze-result .ar-crit { color: #ef4444; font-weight: 600; }
+.analyze-result .ar-placeholder { color: #444; font-size: 13px; }
 .d-msg { padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; max-width: 85%; }
 .d-msg.parent { background: #1e3a5f; color: #b0cce0; align-self: flex-end; }
 .d-msg.bot { background: #1e1e35; color: #c0c0d0; align-self: flex-start; }
@@ -1256,10 +1269,17 @@ function selectCase(sessionId) {
       <div class="tabs">
         <div class="tab active" id="tab-soap" onclick="switchTab('soap')">📋 SOAP</div>
         <div class="tab" id="tab-dialog" onclick="switchTab('dialog')">💬 Диалог</div>
+        <div class="tab" id="tab-analyze" onclick="switchTab('analyze')">🔬 Анализы</div>
       </div>
       <div id="panel-soap" class="soap-content">${renderSoap(c.soap || 'Генерация SOAP...')}</div>
       <div id="panel-dialog" style="display:none" class="dialog-content">
         ${renderDialog(c.messages || [])}
+      </div>
+      <div id="panel-analyze" style="display:none" class="analyze-panel">
+        <div style="font-size:12px;color:#666;margin-bottom:2px;">Вставьте результаты анализов, описание рентгена, ЭКГ или других исследований — ИИ разберёт их в контексте жалоб пациента.</div>
+        <textarea class="analyze-input" id="analyze-input" placeholder="ОАК: Hb 98 г/л, лейкоциты 12.4×10⁹/л, СОЭ 34...&#10;Рентген ОГК: усиление лёгочного рисунка..."></textarea>
+        <button class="btn btn-approve" id="btn-analyze" onclick="analyzeResults(${JSON.stringify(sessionId)})">🔬 Интерпретировать</button>
+        <div id="analyze-result" class="analyze-result"><div class="ar-placeholder">Результат анализа появится здесь.</div></div>
       </div>
     </div>
 
@@ -1322,8 +1342,10 @@ function switchTab(tab) {
   activeTab = tab;
   document.getElementById('tab-soap').className = 'tab' + (tab === 'soap' ? ' active' : '');
   document.getElementById('tab-dialog').className = 'tab' + (tab === 'dialog' ? ' active' : '');
+  document.getElementById('tab-analyze').className = 'tab' + (tab === 'analyze' ? ' active' : '');
   document.getElementById('panel-soap').style.display = tab === 'soap' ? 'block' : 'none';
   document.getElementById('panel-dialog').style.display = tab === 'dialog' ? 'flex' : 'none';
+  document.getElementById('panel-analyze').style.display = tab === 'analyze' ? 'flex' : 'none';
 }
 
 function renderDialog(messages) {
@@ -1335,6 +1357,53 @@ function renderDialog(messages) {
       <div class="role">${roleLabel}</div>
       ${escapeHtml(m.text).split('\\n').join('<br>')}
     </div>`;
+  }).join('');
+}
+
+function analyzeResults(sessionId) {
+  const inputEl = document.getElementById('analyze-input');
+  const resultEl = document.getElementById('analyze-result');
+  const btnEl = document.getElementById('btn-analyze');
+  const labText = inputEl ? inputEl.value.trim() : '';
+  if (!labText) { showToast('Вставьте результаты анализов'); return; }
+  btnEl.disabled = true;
+  btnEl.textContent = '⏳ Анализирую...';
+  resultEl.innerHTML = '<div class="ar-placeholder">ИИ обрабатывает данные...</div>';
+  fetch('/api/analyze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId, lab_text: labText})
+  })
+  .then(r => r.json())
+  .then(data => {
+    btnEl.disabled = false;
+    btnEl.textContent = '🔬 Интерпретировать';
+    if (data.error) { resultEl.innerHTML = '<div class="ar-crit">Ошибка: ' + escapeHtml(data.error) + '</div>'; return; }
+    resultEl.innerHTML = renderAnalysis(data.result || '');
+  })
+  .catch(err => {
+    btnEl.disabled = false;
+    btnEl.textContent = '🔬 Интерпретировать';
+    resultEl.innerHTML = '<div class="ar-crit">Ошибка соединения</div>';
+  });
+}
+
+function renderAnalysis(text) {
+  const NL = String.fromCharCode(10);
+  return text.split(NL).map(line => {
+    const safe = escapeHtml(line);
+    if (safe.startsWith('### ') || safe.startsWith('## ') || safe.startsWith('# ')) {
+      const t = safe.replace(/^#+\s*/, '');
+      return '<div class="ar-title">' + t + '</div>';
+    }
+    if (/[↑↓⬆⬇]|(высок|низк|выше нормы|ниже нормы|повышен|снижен)/i.test(safe)) {
+      return '<div class="ar-warn">' + safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</div>';
+    }
+    if (/(!{2,}|⚠|критич|срочно|экстренно)/i.test(safe)) {
+      return '<div class="ar-crit">' + safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</div>';
+    }
+    const bold = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    return bold ? bold + '<br>' : '<br>';
   }).join('');
 }
 
@@ -1852,6 +1921,72 @@ async def api_delete_appointment(appt_id: str, request: Request):
     global appointments
     appointments = [a for a in appointments if a["id"] != appt_id]
     return {"ok": True}
+
+
+@app.post("/api/analyze")
+async def api_analyze(request: Request):
+    """Интерпретация анализов — Claude разбирает результаты в контексте SOAP-заметки."""
+    if not _check_session(request):
+        return Response("Unauthorized", status_code=401)
+    data = await request.json()
+    session_id = data.get("session_id", "")
+    lab_text = data.get("lab_text", "").strip()
+    if not lab_text:
+        return {"error": "Нет данных для анализа"}
+
+    session = sessions.get(session_id, {})
+    soap = session.get("soap", "")
+
+    if DEMO_MODE:
+        await asyncio.sleep(1.5)
+        return {"result": """## Общий анализ крови
+
+**Гемоглобин 98 г/л** — ↓ ниже нормы (норма 115–145 г/л для данного возраста). Лёгкая железодефицитная анемия.
+**Лейкоциты 12.4×10⁹/л** — ↑ умеренный лейкоцитоз. Характерен для бактериальной инфекции или вирусного воспаления.
+**СОЭ 34 мм/ч** — ↑ повышено. Подтверждает активный воспалительный процесс.
+
+## Клиническое значение
+
+В сочетании с жалобами пациента: картина соответствует острому инфекционному процессу на фоне латентного железодефицита.
+
+## Рекомендации врачу
+
+- Рассмотреть дополнительно: ферритин, сывороточное железо, TIBC
+- При подтверждении ЖДА — препараты железа после купирования острого процесса
+- Контроль ОАК через 2–3 недели"""}
+
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        context_block = ""
+        if soap:
+            context_block = f"""SOAP-заметка пациента (контекст):
+{soap}
+
+"""
+
+        prompt = f"""{context_block}Результаты исследований, предоставленные пациентом:
+{lab_text}
+
+Задача: интерпретируй результаты как клинический ассистент педиатра.
+
+Структура ответа (используй Markdown ##):
+1. Разбор каждого показателя — норма/отклонение, клиническое значение
+2. Общая картина — что всё это означает в контексте жалоб
+3. На что обратить внимание врачу — какие дополнительные данные нужны, какие шаги рассмотреть
+
+Пиши кратко, по делу, для врача. Отклонения обозначай стрелками ↑↓."""
+
+        response = await client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1500,
+            system="Ты клинический ассистент педиатра. Интерпретируй результаты исследований точно и кратко на русском языке. Указывай нормы для детского возраста. Не ставь диагноз — только помогай врачу увидеть клиническую картину.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return {"result": response.content[0].text}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/cockpit", response_class=HTMLResponse)
