@@ -268,8 +268,8 @@ def extract_patient_label(session: dict) -> str:
     all_text = " ".join(m["text"] for m in session.get("messages", []) if m["role"] == "parent")
 
     import re
-    # Ищем возраст
-    age_match = re.search(r'(\d+)\s*(лет|год|годик|месяц)', all_text)
+    # Ищем возраст (поддержка "3,5 года", "1.5 лет")
+    age_match = re.search(r'(\d+[,.]?\d*)\s*(лет|год|годик|месяц)', all_text)
     age = age_match.group(0) if age_match else None
 
     # Ищем имя (слово с большой буквы после "зовут", "имя", "ребёнка")
@@ -993,29 +993,48 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
 .btn-modal-ok { background: #22c55e; color: white; }
 .btn-modal-cancel { background: #2a2a4a; color: #888; }
 
-/* Панель расписания */
-.schedule-panel { position: fixed; top: 0; right: -420px; width: 400px; height: 100vh;
+/* Панель-календарь (слайд справа) */
+.schedule-panel { position: fixed; top: 0; right: -520px; width: 500px; height: 100vh;
                   background: #0f0f23; border-left: 1px solid #2a2a4a; z-index: 150;
                   transition: right 0.3s ease; display: flex; flex-direction: column; }
 .schedule-panel.open { right: 0; }
-.schedule-header { padding: 18px 20px; border-bottom: 1px solid #1a1a35;
-                   display: flex; align-items: center; justify-content: space-between; }
-.schedule-header h2 { font-size: 15px; font-weight: 700; color: white; }
+.schedule-header { padding: 14px 16px; border-bottom: 1px solid #1a1a35;
+                   display: flex; align-items: center; gap: 8px; }
+.schedule-header h2 { font-size: 14px; font-weight: 700; color: white; flex: 1; }
 .schedule-close { background: none; border: none; color: #888; cursor: pointer; font-size: 20px; padding: 0; }
-.schedule-body { flex: 1; overflow-y: auto; padding: 16px; }
-.sched-day { margin-bottom: 20px; }
-.sched-day-title { font-size: 11px; font-weight: 700; color: #ff6b35; text-transform: uppercase;
-                   letter-spacing: 1px; margin-bottom: 8px; padding-bottom: 4px;
-                   border-bottom: 1px solid #1a1a35; }
-.sched-item { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 8px;
-              padding: 10px 14px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; }
-.sched-time { font-size: 15px; font-weight: 700; color: #ff6b35; min-width: 48px; }
-.sched-info { flex: 1; }
-.sched-name { font-size: 13px; color: #e0e0e0; font-weight: 600; }
-.sched-note { font-size: 11px; color: #666; margin-top: 2px; }
-.sched-del { background: none; border: none; color: #444; cursor: pointer; font-size: 16px;
-             padding: 0 4px; transition: color 0.15s; }
-.sched-del:hover { color: #ef4444; }
+/* Навигация по неделям внутри панели */
+.cal-nav { display: flex; align-items: center; gap: 6px; padding: 10px 14px;
+           border-bottom: 1px solid #0d0d1f; background: #0a0a1a; }
+.cal-nav-title { flex: 1; text-align: center; font-size: 12px; font-weight: 700; color: #ccc; }
+.cal-btn { background: #1a1a2e; border: 1px solid #2a2a4a; color: #888; padding: 4px 10px;
+           border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 600; transition: all 0.15s; }
+.cal-btn:hover { border-color: #ff6b35; color: #ff6b35; }
+/* Таблица-сетка внутри панели */
+.schedule-body { flex: 1; overflow-y: auto; overflow-x: auto; }
+.cal-table { width: 100%; border-collapse: collapse; min-width: 460px; }
+.cal-table thead th { padding: 8px 3px 6px; text-align: center; font-size: 11px; font-weight: 700;
+                      border-bottom: 2px solid #1a1a35; position: sticky; top: 0;
+                      background: #0f0f23; z-index: 2; }
+.cal-table th.today-col { background: rgba(255,107,53,0.08); }
+.cal-day-name { display: block; font-size: 9px; color: #555; font-weight: 400; margin-bottom: 3px; }
+.cal-day-num { font-size: 15px; color: #e0e0e0; display: inline-block; width: 24px;
+               height: 24px; line-height: 24px; text-align: center; border-radius: 50%; }
+.today-num { background: #ff6b35 !important; color: white !important; }
+.cal-table tbody td { border-bottom: 1px solid #0d0d1f; border-right: 1px solid #0d0d1f;
+                      vertical-align: top; padding: 2px 2px; min-height: 42px; }
+.cal-table tbody td.today-col { background: rgba(255,107,53,0.04); }
+.cal-time-cell { text-align: right; padding: 2px 6px 2px 3px !important; font-size: 10px;
+                 color: #2a2a4a; font-weight: 700; white-space: nowrap; width: 38px;
+                 vertical-align: middle; background: #08080f;
+                 border-right: 2px solid #1a1a35 !important; }
+.cal-appt { background: #1b3a5c; border-left: 3px solid #4a9eff; border-radius: 4px;
+            padding: 3px 5px; margin: 2px 1px; overflow: hidden; }
+.cal-appt-del { float: right; background: none; border: none; color: #2a4060;
+                cursor: pointer; font-size: 10px; padding: 0; line-height: 1; }
+.cal-appt-del:hover { color: #ef4444; }
+.cal-appt-time { font-size: 9px; color: #64b5f6; font-weight: 700; }
+.cal-appt-name { font-size: 10px; color: #c8e0ff; line-height: 1.3; margin-top: 1px; }
+.cal-appt-note { font-size: 9px; color: #3a6a8a; margin-top: 1px; }
 .sched-empty { text-align: center; color: #444; font-size: 13px; padding: 40px 0; }
 
 @media (max-width: 640px) {
@@ -1088,15 +1107,19 @@ textarea.draft-edit:focus { border-color: #ff6b35; }
   </div>
 </div>
 
-<!-- Панель расписания -->
+<!-- Панель расписания (слайд справа) -->
 <div class="schedule-panel" id="schedule-panel">
   <div class="schedule-header">
     <h2>📅 Расписание приёмов</h2>
     <button class="schedule-close" onclick="toggleSchedule()">✕</button>
   </div>
-  <div class="schedule-body" id="schedule-body">
-    <div class="sched-empty">Нет записей</div>
+  <div class="cal-nav">
+    <button class="cal-btn" onclick="calPrevWeek()">‹</button>
+    <span class="cal-nav-title" id="cal-nav-title"></span>
+    <button class="cal-btn" onclick="calNextWeek()">›</button>
+    <button class="cal-btn" onclick="calGoToday()">Сегодня</button>
   </div>
+  <div class="schedule-body" id="schedule-body"></div>
 </div>
 
 <script>
@@ -1104,13 +1127,74 @@ let cases = {};
 let activeSession = null;
 let activeTab = 'soap';
 
-// REST polling — каждые 3 секунды
-function startPolling() {
-  reloadSessions();
-  setInterval(reloadSessions, 3000);
+// SSE — основной канал, мгновенно получает все текущие кейсы при подключении
+let sseSource = null;
+
+function connectSSE() {
+  if (sseSource) { sseSource.close(); sseSource = null; }
+  const statusEl = document.getElementById('ws-status');
+  const pollEl = document.getElementById('poll-status');
+  sseSource = new EventSource('/api/events');
+  sseSource.onopen = () => {
+    if (statusEl) { statusEl.textContent = '🟢 Активен'; statusEl.style.color = '#4caf50'; }
+    if (pollEl) pollEl.textContent = 'SSE подключён';
+    console.log('[sse] connected');
+  };
+  sseSource.onmessage = (e) => {
+    console.log('[sse] event:', e.data.slice(0, 80));
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'init') {
+        // Все текущие кейсы при первом подключении
+        (data.cases || []).forEach(c => {
+          cases[c.session_id] = c;
+        });
+        renderSidebar();
+        const first = (data.cases || [])[0];
+        if (first && !activeSession) {
+          try { selectCase(first.session_id); } catch(e) { console.error(e); }
+        }
+        const t = new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+        const total = (data.cases || []).filter(c => c.status !== 'archived').length;
+        if (pollEl) pollEl.textContent = t + (total > 0 ? ' · ' + total + ' запр.' : ' · пусто');
+      } else if (data.type === 'new_case') {
+        const isNew = !cases[data.session_id];
+        cases[data.session_id] = data;
+        renderSidebar();
+        if (isNew && !activeSession) {
+          try { selectCase(data.session_id); } catch(e) { console.error(e); }
+          showToast('🔔 Новый запрос: ' + (data.label || data.session_id));
+        }
+      } else if (data.type === 'case_update') {
+        if (cases[data.session_id]) cases[data.session_id].status = data.status;
+        renderSidebar();
+      }
+    } catch(err) { console.error('[sse] parse error:', err); }
+  };
+  sseSource.onerror = () => {
+    if (statusEl) { statusEl.textContent = '🟡 Переподключение'; statusEl.style.color = '#ff9800'; }
+    console.warn('[sse] error, will reconnect');
+  };
 }
 
-function connect() { startPolling(); }
+// REST polling — запасной канал, каждые 5 секунд
+function startPolling() {
+  reloadSessions();
+  setInterval(reloadSessions, 5000);
+}
+
+function connect() {
+  // Проверяем что страница актуальна — защита от браузерного кеша
+  const urlV = new URLSearchParams(window.location.search).get('v');
+  const pageV = 'SERVER_VERSION_PLACEHOLDER';
+  if (urlV && urlV !== pageV) {
+    // Страница устарела — перезагружаем
+    window.location.replace('/cockpit?v=' + pageV);
+    return;
+  }
+  connectSSE();
+  startPolling(); // polling как страховка
+}
 
 function handleNewCase(data, notify = true) {
   cases[data.session_id] = data;
@@ -1386,25 +1470,25 @@ function reloadSessions() {
     .then(list => {
       if (!list) return;
       const t = new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
-      // Считаем новые сессии (которых ещё нет в cases)
       let newCount = 0;
       list.forEach(c => {
         const isNew = !cases[c.session_id];
-        // Всегда обновляем данные (статус мог измениться)
         cases[c.session_id] = c;
         if (isNew) {
           newCount++;
           renderSidebar();
-          if (!activeSession) selectCase(c.session_id);
+          if (!activeSession) {
+            try { selectCase(c.session_id); } catch(e) { console.error('selectCase error:', e); }
+          }
         }
       });
-      // Обновляем статусы существующих
       renderSidebar();
       const total = Object.values(cases).filter(c => c.status !== 'archived').length;
       if (pollEl) pollEl.textContent = t + (total > 0 ? ' · ' + total + ' запр.' : ' · пусто');
       if (newCount > 0) showToast('🔔 Новых запросов: ' + newCount);
     })
-    .catch(() => {
+    .catch(err => {
+      console.error('[poll] error:', err);
       if (pollEl) pollEl.textContent = '⚠️ Нет связи';
       if (statusEl) { statusEl.textContent = '🔴 Нет связи'; statusEl.style.color = '#f44336'; }
     });
@@ -1459,7 +1543,10 @@ function confirmAppointment() {
     const ta = document.getElementById('draft-text');
     if (ta) { ta.value = draftText; ta.focus(); }
     showToast('✅ Запись сохранена: ' + dateStr + ' ' + time);
-    renderSchedule();
+    calWeekStart = getMonday(new Date(date + 'T12:00:00'));
+    if (document.getElementById('schedule-panel').classList.contains('open')) {
+      renderCalendar();
+    }
   }).catch(() => showToast('⚠️ Нет связи'));
 }
 
@@ -1471,51 +1558,124 @@ function formatDateRu(iso) {
   return d.getDate() + ' ' + months[d.getMonth()] + ' (' + days[d.getDay()] + ')';
 }
 
-// ─── Панель расписания ────────────────────────────────────────────────────
+// ─── Панель-календарь (слайд справа) ─────────────────────────────────────
+
+let calWeekStart = null;
+
+function getMonday(d) {
+  const day = d.getDay();
+  const result = new Date(d);
+  result.setDate(d.getDate() - day + (day === 0 ? -6 : 1));
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
 
 function toggleSchedule() {
   const panel = document.getElementById('schedule-panel');
+  const opening = !panel.classList.contains('open');
   panel.classList.toggle('open');
-  if (panel.classList.contains('open')) renderSchedule();
+  if (opening) {
+    if (!calWeekStart) calWeekStart = getMonday(new Date());
+    renderCalendar();
+  }
 }
 
-function renderSchedule() {
+function calPrevWeek() {
+  calWeekStart = new Date(calWeekStart);
+  calWeekStart.setDate(calWeekStart.getDate() - 7);
+  renderCalendar();
+}
+
+function calNextWeek() {
+  calWeekStart = new Date(calWeekStart);
+  calWeekStart.setDate(calWeekStart.getDate() + 7);
+  renderCalendar();
+}
+
+function calGoToday() {
+  calWeekStart = getMonday(new Date());
+  renderCalendar();
+}
+
+function renderCalendar() {
   fetch('/api/appointments').then(r => r.json()).then(list => {
-    const body = document.getElementById('schedule-body');
-    if (!list.length) {
-      body.innerHTML = '<div class="sched-empty">Нет записей на приём</div>';
-      return;
+    const TODAY = new Date();
+    TODAY.setHours(0, 0, 0, 0);
+    const todayStr = TODAY.toISOString().slice(0, 10);
+
+    const MONTH_RU = ['янв','фев','мар','апр','май','июн',
+                      'июл','авг','сен','окт','ноя','дек'];
+    const MONTH_FULL = ['января','февраля','марта','апреля','мая','июня',
+                        'июля','августа','сентября','октября','ноября','декабря'];
+    const DAY_RU = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(calWeekStart);
+      d.setDate(calWeekStart.getDate() + i);
+      days.push(d);
     }
-    // Группируем по дате
-    const byDate = {};
+
+    // Заголовок «16–22 мар 2026»
+    const d0 = days[0], d6 = days[6];
+    let title = d0.getDate();
+    if (d0.getMonth() !== d6.getMonth()) title += ' ' + MONTH_RU[d0.getMonth()];
+    title += '\u2013' + d6.getDate() + ' ' + MONTH_RU[d6.getMonth()] + ' ' + d6.getFullYear();
+    document.getElementById('cal-nav-title').textContent = title;
+
+    // Индекс: "YYYY-MM-DD|HH" → [appt, ...]
+    const idx = {};
     list.forEach(a => {
-      if (!byDate[a.date]) byDate[a.date] = [];
-      byDate[a.date].push(a);
+      const h = parseInt(a.time.split(':')[0], 10);
+      const k = a.date + '|' + h;
+      if (!idx[k]) idx[k] = [];
+      idx[k].push(a);
     });
-    const today = new Date().toISOString().slice(0, 10);
-    body.innerHTML = Object.keys(byDate).sort().map(date => {
-      const isToday = date === today;
-      const label = isToday ? 'Сегодня' : formatDateRu(date);
-      const items = byDate[date].map(a => `
-        <div class="sched-item">
-          <div class="sched-time">${a.time}</div>
-          <div class="sched-info">
-            <div class="sched-name">${escapeHtml(a.label)}</div>
-            ${a.note ? '<div class="sched-note">' + escapeHtml(a.note) + '</div>' : ''}
-          </div>
-          <button class="sched-del" onclick="deleteAppt('${a.id}')" title="Удалить">✕</button>
-        </div>`).join('');
-      return `<div class="sched-day">
-        <div class="sched-day-title">${label}</div>
-        ${items}
-      </div>`;
+
+    // Шапка
+    const thCells = days.map(d => {
+      const ds = d.toISOString().slice(0, 10);
+      const isToday = ds === todayStr;
+      const num = isToday
+        ? '<span class="cal-day-num today-num">' + d.getDate() + '</span>'
+        : '<span class="cal-day-num">' + d.getDate() + '</span>';
+      return '<th class="' + (isToday ? 'today-col' : '') + '">'
+        + '<span class="cal-day-name">' + DAY_RU[d.getDay()] + '</span>'
+        + num + '</th>';
     }).join('');
+
+    // Строки 9:00–19:00
+    const rows = [];
+    for (let h = 9; h <= 19; h++) {
+      const cells = days.map(d => {
+        const ds = d.toISOString().slice(0, 10);
+        const isToday = ds === todayStr;
+        const appts = idx[ds + '|' + h] || [];
+        const inner = appts.map(a => [
+          '<div class="cal-appt">',
+          '<button class="cal-appt-del" onclick="deleteAppt(this.dataset.id)" data-id="' + escapeHtml(String(a.id)) + '" title="Удалить">✕</button>',
+          '<div class="cal-appt-time">' + a.time + '</div>',
+          '<div class="cal-appt-name">' + escapeHtml(a.label) + '</div>',
+          (a.note ? '<div class="cal-appt-note">' + escapeHtml(a.note) + '</div>' : ''),
+          '</div>'
+        ].join('')).join('');
+        return '<td class="' + (isToday ? 'today-col' : '') + '">' + inner + '</td>';
+      }).join('');
+      rows.push('<tr><td class="cal-time-cell">' + h + ':00</td>' + cells + '</tr>');
+    }
+
+    document.getElementById('schedule-body').innerHTML =
+      '<table class="cal-table"><thead><tr>'
+      + '<th style="width:38px"></th>' + thCells
+      + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+
   }).catch(() => {});
 }
 
-function deleteAppt(id) {
+function deleteAppt(btn) {
+  const id = (typeof btn === 'string') ? btn : btn.dataset.id;
   fetch('/api/appointment/' + id, {method: 'DELETE'})
-    .then(r => r.json()).then(() => { renderSchedule(); showToast('Запись удалена'); });
+    .then(r => r.json()).then(() => { renderCalendar(); showToast('Запись удалена'); });
 }
 
 // Закрываем модал по клику вне него
@@ -1698,6 +1858,12 @@ async def api_delete_appointment(appt_id: str, request: Request):
 async def cockpit_page(request: Request):
     if not _check_session(request):
         return RedirectResponse("/login", status_code=302)
+    # Если версия в URL не совпадает с текущей — редиректим на актуальный кокпит
+    v = request.query_params.get("v")
+    if v and v != str(SERVER_START):
+        return RedirectResponse(f"/cockpit?v={SERVER_START}", status_code=302)
+    if not v:
+        return RedirectResponse(f"/cockpit?v={SERVER_START}", status_code=302)
     mode = "⚠️ DEMO" if DEMO_MODE else "✅ Claude AI"
     cls = "mode-demo" if DEMO_MODE else "mode-real"
     html = (COCKPIT_HTML
