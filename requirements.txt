@@ -1,4 +1,7 @@
-# Core AI
+# Core AI — MVP
+anthropic>=0.84.0
+
+# Core AI — Production (полная версия с Gemini)
 google-generativeai>=0.8.0
 
 # Data validation & settings
@@ -16,7 +19,7 @@ pdfplumber>=0.10
 rich>=13.0
 readchar>=4.0
 
-# Web cockpit (Phase 2)
+# Web (MVP — кокпит и родительский чат)
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
