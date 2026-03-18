@@ -1,5 +1,39 @@
 # Правила работы с проектом Doc Orchestra
 
+## Быстрый старт (читай это первым делом)
+
+Единственный рабочий файл MVP — `mvp.py`. Запускается так:
+
+```bash
+.venv/bin/python3 mvp.py
+```
+
+После запуска открыть в браузере:
+- Родитель → http://localhost:8081/parent
+- Врач (кокпит) → http://localhost:8081/cockpit (пароль из `.env` → `COCKPIT_PASSWORD`, по умолчанию `doctor123`)
+
+**Если сервер уже запущен и нужно перезапустить:**
+```bash
+lsof -ti :8081 | xargs kill -9 2>/dev/null; .venv/bin/python3 mvp.py
+```
+
+**Проверить синтаксис перед запуском (обязательно после любых правок JS):**
+```bash
+python3 -c "import ast; ast.parse(open('mvp.py').read()); print('Python OK')" && \
+python3 -c "
+with open('mvp.py') as f: src = f.read()
+start = src.find('COCKPIT_HTML = \"\"\"'); end = src.find('\"\"\"', start + 17)
+html = src[start+17:end]
+js = html[html.rfind('<script>')+8:html.rfind('</script>')]
+open('/tmp/js_check.js','w').write(js)
+" && node --check /tmp/js_check.js && echo "JS OK"
+```
+
+**Текущая фаза:** 1.5 выполнена → следующая Фаза 2 (тест с врачом).
+**Документация:** `PLAN.md` — план, `project.md` — архитектура, `KNOWN_ISSUES.md` — известные ошибки и решения.
+
+---
+
 ## Структура страниц
 
 - Все страницы (родитель, кокпит, любые новые UI) делаем в **одном HTML-файле** — без внешних библиотек (никакого Bootstrap, Tailwind, React и т.д.)
