@@ -10,3 +10,4 @@ __pycache__/
 venv/
 *.egg-info/
 dist/
+.DS_Store
