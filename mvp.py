@@ -508,6 +508,8 @@ PARENT_HTML = """<!DOCTYPE html>
 body { font-family: -apple-system, sans-serif; background: #e5ddd5; height: 100dvh; display: flex; flex-direction: column; }
 
 .header { background: #075e54; color: white; padding: 14px 18px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.btn-new-chat { margin-left: auto; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: white; border-radius: 16px; padding: 5px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+.btn-new-chat:hover { background: rgba(255,255,255,0.25); }
 .avatar { width: 42px; height: 42px; background: #25D366; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
 .header-info h3 { font-size: 15px; font-weight: 600; }
 .header-info p { font-size: 12px; opacity: 0.75; margin-top: 2px; }
@@ -544,6 +546,7 @@ button#sendBtn:disabled { background: #ccc; cursor: default; }
     <h3>Медицинский ассистент</h3>
     <p id="status-indicator">На связи</p>
   </div>
+  <button class="btn-new-chat" onclick="confirmNewChat()">✏️ Новый чат</button>
 </div>
 
 <div class="messages" id="messages"></div>
@@ -718,6 +721,12 @@ function newChat() {
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(_PERSIST_KEY);
   location.reload();
+}
+
+function confirmNewChat() {
+  const msgs = document.getElementById('messages');
+  if (!msgs || msgs.children.length === 0) { newChat(); return; }
+  if (confirm('Начать новый чат? История переписки удалится.')) newChat();
 }
 
 // При загрузке страницы
@@ -1276,9 +1285,13 @@ function selectCase(sessionId) {
         ${renderDialog(c.messages || [])}
       </div>
       <div id="panel-analyze" style="display:none" class="analyze-panel">
-        <div style="font-size:12px;color:#666;margin-bottom:2px;">Вставьте результаты анализов, описание рентгена, ЭКГ или других исследований — ИИ разберёт их в контексте жалоб пациента.</div>
-        <textarea class="analyze-input" id="analyze-input" placeholder="ОАК: Hb 98 г/л, лейкоциты 12.4×10⁹/л, СОЭ 34...&#10;Рентген ОГК: усиление лёгочного рисунка..."></textarea>
-        <button class="btn btn-approve" id="btn-analyze" onclick="analyzeResults(${JSON.stringify(sessionId)})">🔬 Интерпретировать</button>
+        <div style="font-size:12px;color:#666;margin-bottom:2px;">Вставьте результаты анализов, фото снимка или другого исследования — ИИ разберёт их в контексте жалоб пациента.</div>
+        <div id="analyze-image-preview" style="display:none;position:relative;margin-bottom:4px;">
+          <img id="analyze-image-el" style="max-width:100%;border-radius:8px;border:1px solid #2a2a4a;" />
+          <button onclick="removeAnalyzeImage()" style="position:absolute;top:6px;right:6px;background:#333;border:none;color:#fff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:14px;line-height:1;">✕</button>
+        </div>
+        <textarea class="analyze-input" id="analyze-input" placeholder="ОАК: Hb 98 г/л, лейкоциты 12.4×10⁹/л, СОЭ 34...&#10;Рентген ОГК: усиление лёгочного рисунка...&#10;&#10;Или вставьте фото (Cmd+V / Ctrl+V)"></textarea>
+        <button class="btn btn-approve" id="btn-analyze" onclick="analyzeResults(\'${sessionId}\')">🔬 Интерпретировать</button>
         <div id="analyze-result" class="analyze-result"><div class="ar-placeholder">Результат анализа появится здесь.</div></div>
       </div>
     </div>
@@ -1360,19 +1373,70 @@ function renderDialog(messages) {
   }).join('');
 }
 
+let analyzeImageData = null;  // base64 без префикса data:...
+let analyzeImageType = null;  // 'image/jpeg' и т.п.
+
+function removeAnalyzeImage() {
+  analyzeImageData = null;
+  analyzeImageType = null;
+  const preview = document.getElementById('analyze-image-preview');
+  if (preview) preview.style.display = 'none';
+}
+
+// Event delegation: textarea создаётся динамически, поэтому слушаем на document
+// Любой формат конвертируем в JPEG через canvas — Claude API не поддерживает TIFF и др.
+document.addEventListener('paste', function(e) {
+  if (!e.target || e.target.id !== 'analyze-input') return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type.startsWith('image/')) {
+      e.preventDefault();
+      const file = items[i].getAsFile();
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        const img = new Image();
+        img.onload = function() {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          canvas.getContext('2d').drawImage(img, 0, 0);
+          const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+          analyzeImageType = 'image/jpeg';
+          analyzeImageData = jpegDataUrl.split(',')[1];
+          const imgEl = document.getElementById('analyze-image-el');
+          const preview = document.getElementById('analyze-image-preview');
+          if (imgEl && preview) {
+            imgEl.src = jpegDataUrl;
+            preview.style.display = 'block';
+          }
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+  }
+});
+
 function analyzeResults(sessionId) {
   const inputEl = document.getElementById('analyze-input');
   const resultEl = document.getElementById('analyze-result');
   const btnEl = document.getElementById('btn-analyze');
   const labText = inputEl ? inputEl.value.trim() : '';
-  if (!labText) { showToast('Вставьте результаты анализов'); return; }
+  if (!labText && !analyzeImageData) { showToast('Вставьте результаты анализов или фото'); return; }
   btnEl.disabled = true;
   btnEl.textContent = '⏳ Анализирую...';
   resultEl.innerHTML = '<div class="ar-placeholder">ИИ обрабатывает данные...</div>';
+  const payload = {session_id: sessionId, lab_text: labText};
+  if (analyzeImageData) {
+    payload.image_data = analyzeImageData;
+    payload.image_type = analyzeImageType || 'image/jpeg';
+  }
   fetch('/api/analyze', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({session_id: sessionId, lab_text: labText})
+    body: JSON.stringify(payload)
   })
   .then(r => r.json())
   .then(data => {
@@ -1384,7 +1448,8 @@ function analyzeResults(sessionId) {
   .catch(err => {
     btnEl.disabled = false;
     btnEl.textContent = '🔬 Интерпретировать';
-    resultEl.innerHTML = '<div class="ar-crit">Ошибка соединения</div>';
+    resultEl.innerHTML = '<div class="ar-crit">Ошибка соединения: ' + escapeHtml(String(err)) + '</div>';
+    showToast('⚠️ Ошибка: ' + String(err).substring(0, 60));
   });
 }
 
@@ -1931,7 +1996,9 @@ async def api_analyze(request: Request):
     data = await request.json()
     session_id = data.get("session_id", "")
     lab_text = data.get("lab_text", "").strip()
-    if not lab_text:
+    image_data = data.get("image_data", "")   # base64
+    image_type = data.get("image_type", "image/jpeg")
+    if not lab_text and not image_data:
         return {"error": "Нет данных для анализа"}
 
     session = sessions.get(session_id, {})
@@ -1966,9 +2033,11 @@ async def api_analyze(request: Request):
 
 """
 
-        prompt = f"""{context_block}Результаты исследований, предоставленные пациентом:
-{lab_text}
+        text_part = ""
+        if lab_text:
+            text_part = f"\nРезультаты исследований (текст):\n{lab_text}\n"
 
+        task_instructions = """
 Задача: интерпретируй результаты как клинический ассистент педиатра.
 
 Структура ответа (используй Markdown ##):
@@ -1978,11 +2047,31 @@ async def api_analyze(request: Request):
 
 Пиши кратко, по делу, для врача. Отклонения обозначай стрелками ↑↓."""
 
+        if image_data:
+            # Vision: передаём картинку + текст
+            content = []
+            if context_block:
+                content.append({"type": "text", "text": context_block})
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_type,
+                    "data": image_data,
+                }
+            })
+            if text_part:
+                content.append({"type": "text", "text": text_part})
+            content.append({"type": "text", "text": task_instructions})
+        else:
+            prompt = f"{context_block}{text_part}{task_instructions}"
+            content = prompt
+
         response = await client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=1500,
             system="Ты клинический ассистент педиатра. Интерпретируй результаты исследований точно и кратко на русском языке. Указывай нормы для детского возраста. Не ставь диагноз — только помогай врачу увидеть клиническую картину.",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
         )
         return {"result": response.content[0].text}
     except Exception as e:
