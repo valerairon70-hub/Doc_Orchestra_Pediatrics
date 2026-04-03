@@ -18,7 +18,7 @@ SERVER_START = int(time.time())  # уникальная версия — мен�
 
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 # --------------------------------------------------------------------------
 # Загрузка .env
@@ -178,36 +178,37 @@ async def get_ai_response(session_id: str, user_message: str, phase: str) -> str
             max_tokens=512,
             system=f"""Ты — личный ассистент {DOCTOR_NAME}. Собираешь информацию о ребёнке, пока врач занят, чтобы он сразу видел полную картину и мог быстро помочь.
 
-ПРАВИЛА ДИАЛОГА:
-1. Отвечай кратко и с заботой. Родитель переживает за ребёнка — это всегда тревожно.
-2. Задавай СТРОГО ОДИН вопрос за раз.
-3. Внимательно читай историю — не повторяй вопросы на которые уже ответили.
-4. Если родитель сказал что чего-то НЕТ — не уточняй повторно.
-5. Если родитель раздражён — коротко извинись и задай следующий вопрос.
-6. Если спрашивают про запись/приём — отвечай: "{DOCTOR_NAME} свяжется с вами сразу после того как я передам информацию."
-7. ЭКСТРЕННО (не дышит / судороги / потеря сознания) → только: "Немедленно вызовите скорую — 103!"
-8. Никогда не ставь диагнозы и не назначай лечение.
-9. НИКОГДА не говори "хорошо", "нормально", "это нормально", "спасибо за информацию" в ответ на симптомы или беспокойство — это звучит равнодушно. Вместо этого: "Понял", "Записал", "Не переживайте, я всё фиксирую и сразу передам врачу".
+ПЕРЕД КАЖДЫМ ОТВЕТОМ — ОБЯЗАТЕЛЬНЫЙ ШАГ:
+Прочитай ВСЮ историю диалога. Выпиши мысленно что уже известно: жалоба, температура, длительность, возраст. Спрашивай ТОЛЬКО то, чего действительно нет в истории.
 
-ЧТО СОБРАТЬ (в порядке):
-1. Главная жалоба — родитель сам рассказывает
-2. Температура — если не назвали
-3. Как давно началось
-4. Возраст ребёнка
+ПРАВИЛА ДИАЛОГА:
+1. Задавай СТРОГО ОДИН вопрос за раз. Никогда два вопроса в одном сообщении.
+2. Если родитель УЖЕ УПОМЯНУЛ что-либо в любом из своих сообщений — это собрано. НЕ переспрашивай.
+3. Если родитель сказал что чего-то НЕТ (например, "температуры нет") — считай это ответом. Не уточняй повторно.
+4. Если родитель написал развёрнутое первое сообщение — сначала извлеки из него всё что можно, потом задай максимум 1-2 уточняющих вопроса о том, чего нет.
+5. Если родитель раздражён или пишет "я уже сказал" — немедленно извинись и не задавай этот вопрос снова.
+6. Отвечай кратко и с заботой — родитель переживает за ребёнка.
+7. Если спрашивают про запись/приём — отвечай: "{DOCTOR_NAME} свяжется с вами сразу после того как я передам информацию."
+8. ЭКСТРЕННО (не дышит / судороги / потеря сознания) → только: "Немедленно вызовите скорую — 103!"
+9. Никогда не ставь диагнозы и не назначай лечение.
+10. НИКОГДА не говори "хорошо", "нормально", "это нормально" в ответ на симптомы — звучит равнодушно. Вместо этого: "Понял", "Записал", "Не переживайте, я всё фиксирую".
+
+ЧТО НУЖНО СОБРАТЬ:
+- Главная жалоба (родитель обычно сам рассказывает)
+- Температура (если не упомянута)
+- Как давно началось (если не упомянуто)
+- Возраст ребёнка (если не упомянут)
+
+Если возраст так и не назван, но всё остальное есть — можно завершить диалог и без него.
 
 КОГДА ЗАКАНЧИВАТЬ:
-Как только у тебя есть: жалоба + температура + длительность + возраст — напиши прощальное сообщение И добавь в самом конце маркер [ГОТОВО].
+Как только собрано: жалоба + температура + длительность + возраст (или 3 из 4 если родитель явно не хочет отвечать) — напиши прощальное сообщение И добавь маркер [ГОТОВО].
 
-Прощальное сообщение должно:
-- Кратко подтвердить что собрал: "Записал: температура Х°С, [симптомы], [возраст], началось [когда]."
-- Сообщить что передаёшь {DOCTOR_NAME}
-- Если родитель спрашивал про приём — ответить на это
-- Закончить словами "Спасибо за доверие."
+Прощальное сообщение: кратко подтверди что записал, сообщи что передаёшь {DOCTOR_NAME}, заверши "Спасибо за доверие."
 
-Пример финального сообщения:
-"Записал: температура 38,5°С, красные пятна на лице, 5 лет, началось сегодня. Передаю {DOCTOR_NAME} — он свяжется с вами в течение нескольких минут. По поводу приёма — уточнит сам. Спасибо за доверие. [ГОТОВО]"
+Пример: "Записал: температура 38,5°С, красные пятна на лице, 5 лет, началось сегодня. Передаю {DOCTOR_NAME} — он свяжется с вами в течение нескольких минут. Спасибо за доверие. [ГОТОВО]"
 
-ВАЖНО: маркер [ГОТОВО] — только в самом конце последнего сообщения. В остальных сообщениях его не используй.""",
+ВАЖНО: маркер [ГОТОВО] — только в самом конце последнего сообщения.""",
             messages=messages,
         )
         return response.content[0].text
@@ -848,9 +849,9 @@ async def parent_websocket(websocket: WebSocket, session_id: str):
                     "locked": True
                 }))
 
-                session["status"] = "waiting_doctor"
                 soap = await generate_soap(session_id)
                 session["soap"] = soap
+                session["status"] = "waiting_doctor"
                 label = extract_patient_label(session)
 
                 await notify_cockpit({
@@ -1260,6 +1261,10 @@ function renderSidebar() {
 function selectCase(sessionId) {
   activeSession = sessionId;
   activeTab = 'soap';
+  analyzeItems = [];
+  pendingImageData = null;
+  pendingImageType = null;
+  pendingAddMode = null;
   renderSidebar();
   const c = cases[sessionId];
   if (!c) return;
@@ -1280,19 +1285,33 @@ function selectCase(sessionId) {
         <div class="tab" id="tab-dialog" onclick="switchTab('dialog')">💬 Диалог</div>
         <div class="tab" id="tab-analyze" onclick="switchTab('analyze')">🔬 Анализы</div>
       </div>
-      <div id="panel-soap" class="soap-content">${renderSoap(c.soap || 'Генерация SOAP...')}</div>
+      <div id="panel-soap" class="soap-content">${renderSoap(c.soap || 'Генерация SOAP...', c.analysis || '')}</div>
       <div id="panel-dialog" style="display:none" class="dialog-content">
         ${renderDialog(c.messages || [])}
       </div>
       <div id="panel-analyze" style="display:none" class="analyze-panel">
-        <div style="font-size:12px;color:#666;margin-bottom:2px;">Вставьте результаты анализов, фото снимка или другого исследования — ИИ разберёт их в контексте жалоб пациента.</div>
-        <div id="analyze-image-preview" style="display:none;position:relative;margin-bottom:4px;">
-          <img id="analyze-image-el" style="max-width:100%;border-radius:8px;border:1px solid #2a2a4a;" />
-          <button onclick="removeAnalyzeImage()" style="position:absolute;top:6px;right:6px;background:#333;border:none;color:#fff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:14px;line-height:1;">✕</button>
+        <div style="font-size:12px;color:#888;margin-bottom:8px;">Добавьте любое количество исследований — текст, фото или файл. ИИ разберёт всё вместе в контексте жалоб пациента.</div>
+        <div id="analyze-items-list"></div>
+        <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;">
+          <input id="analyze-label-input" type="text" placeholder="Название (ОАК, Рентген, ЭКГ...)" style="flex:1;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;padding:6px 10px;color:#e0e0e0;font-size:13px;" />
+          <button onclick="addAnalyzeText()" style="background:#2a2a4a;border:none;color:#e0e0e0;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;white-space:nowrap;">+ Текст</button>
+          <button onclick="triggerFileUpload()" title="Выбрать файл" style="background:#2a2a4a;border:none;color:#e0e0e0;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:15px;white-space:nowrap;">📎</button>
+          <input id="analyze-file-input" type="file" accept="image/*" style="display:none;" onchange="handleFileUpload(this)" />
         </div>
-        <textarea class="analyze-input" id="analyze-input" placeholder="ОАК: Hb 98 г/л, лейкоциты 12.4×10⁹/л, СОЭ 34...&#10;Рентген ОГК: усиление лёгочного рисунка...&#10;&#10;Или вставьте фото (Cmd+V / Ctrl+V)"></textarea>
-        <button class="btn btn-approve" id="btn-analyze" onclick="analyzeResults(\'${sessionId}\')">🔬 Интерпретировать</button>
-        <div id="analyze-result" class="analyze-result"><div class="ar-placeholder">Результат анализа появится здесь.</div></div>
+        <div id="analyze-add-area" style="display:none;margin-bottom:8px;">
+          <div id="analyze-paste-hint" style="font-size:12px;color:#888;margin-bottom:6px;">Вставьте фото (Cmd+V / Ctrl+V) или выберите файл через 📎</div>
+          <textarea id="analyze-input" class="analyze-input" placeholder="Введите текст результатов..."></textarea>
+          <div id="analyze-image-preview" style="display:none;position:relative;margin-bottom:4px;">
+            <img id="analyze-image-el" style="max-width:100%;max-height:160px;object-fit:contain;border-radius:8px;border:1px solid #2a2a4a;" />
+            <button onclick="clearPendingImage()" style="position:absolute;top:6px;right:6px;background:#333;border:none;color:#fff;border-radius:50%;width:22px;height:22px;cursor:pointer;font-size:13px;line-height:1;">✕</button>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button onclick="confirmAddItem()" style="background:#ff6b35;border:none;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:13px;">Добавить</button>
+            <button onclick="cancelAddItem()" style="background:#2a2a4a;border:none;color:#aaa;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:13px;">Отмена</button>
+          </div>
+        </div>
+        <button class="btn btn-approve" id="btn-analyze" onclick="analyzeResults(\'${sessionId}\')">🔬 Интерпретировать всё</button>
+        <div id="analyze-result" class="analyze-result"><div class="ar-placeholder">Добавьте исследования и нажмите «Интерпретировать».</div></div>
       </div>
     </div>
 
@@ -1373,43 +1392,198 @@ function renderDialog(messages) {
   }).join('');
 }
 
-let analyzeImageData = null;  // base64 без префикса data:...
-let analyzeImageType = null;  // 'image/jpeg' и т.п.
+// Список исследований: [{type, label, text?, image_data?, image_type?, preview_url?}]
+let analyzeItems = [];
+let pendingImageData = null;
+let pendingImageType = null;
+let pendingAddMode = null; // 'text' или 'photo'
 
-function removeAnalyzeImage() {
-  analyzeImageData = null;
-  analyzeImageType = null;
+function addAnalyzeText() {
+  pendingAddMode = 'text';
+  pendingImageData = null;
+  pendingImageType = null;
+  const area = document.getElementById('analyze-add-area');
+  const input = document.getElementById('analyze-input');
   const preview = document.getElementById('analyze-image-preview');
+  if (area) area.style.display = 'block';
+  if (input) { input.style.display = 'block'; input.value = ''; input.focus(); }
   if (preview) preview.style.display = 'none';
 }
 
-// Event delegation: textarea создаётся динамически, поэтому слушаем на document
-// Любой формат конвертируем в JPEG через canvas — Claude API не поддерживает TIFF и др.
+function addAnalyzePhoto() {
+  pendingAddMode = 'photo';
+  pendingImageData = null;
+  pendingImageType = null;
+  const area = document.getElementById('analyze-add-area');
+  const input = document.getElementById('analyze-input');
+  const preview = document.getElementById('analyze-image-preview');
+  const hint = document.getElementById('analyze-paste-hint');
+  if (area) area.style.display = 'block';
+  if (input) { input.style.display = 'none'; input.value = ''; }
+  if (preview) preview.style.display = 'none';
+  if (hint) hint.style.display = 'block';
+}
+
+function triggerFileUpload() {
+  pendingAddMode = 'photo';
+  const fi = document.getElementById('analyze-file-input');
+  if (fi) fi.click();
+}
+
+function handleFileUpload(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    const img = new Image();
+    img.onload = function() {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width; canvas.height = img.height;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      pendingImageType = 'image/jpeg';
+      pendingImageData = jpegDataUrl.split(',')[1];
+      const imgEl = document.getElementById('analyze-image-el');
+      const preview = document.getElementById('analyze-image-preview');
+      const area = document.getElementById('analyze-add-area');
+      const textInput = document.getElementById('analyze-input');
+      const hint = document.getElementById('analyze-paste-hint');
+      if (area) area.style.display = 'block';
+      if (textInput) textInput.style.display = 'none';
+      if (imgEl && preview) { imgEl.src = jpegDataUrl; preview.style.display = 'block'; }
+      if (hint) hint.style.display = 'none';
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function clearPendingImage() {
+  pendingImageData = null; pendingImageType = null;
+  const preview = document.getElementById('analyze-image-preview');
+  const input = document.getElementById('analyze-input');
+  const hint = document.getElementById('analyze-paste-hint');
+  if (preview) preview.style.display = 'none';
+  if (input) { input.style.display = pendingAddMode === 'text' ? 'block' : 'none'; }
+  if (hint && pendingAddMode === 'photo') hint.style.display = 'block';
+}
+
+function confirmAddItem() {
+  const labelEl = document.getElementById('analyze-label-input');
+  const inputEl = document.getElementById('analyze-input');
+  const label = (labelEl && labelEl.value.trim()) || (pendingAddMode === 'photo' ? 'Снимок' : 'Анализ');
+  if (pendingAddMode === 'photo' && pendingImageData) {
+    const imgEl = document.getElementById('analyze-image-el');
+    analyzeItems.push({type: 'image', label, image_data: pendingImageData, image_type: pendingImageType || 'image/jpeg', preview_url: imgEl ? imgEl.src : ''});
+  } else if (pendingAddMode === 'text' && inputEl && inputEl.value.trim()) {
+    analyzeItems.push({type: 'text', label, text: inputEl.value.trim()});
+  } else {
+    showToast('Добавьте текст или вставьте фото'); return;
+  }
+  if (labelEl) labelEl.value = '';
+  cancelAddItem();
+  renderAnalyzeItems();
+}
+
+function cancelAddItem() {
+  pendingAddMode = null; pendingImageData = null; pendingImageType = null;
+  const area = document.getElementById('analyze-add-area');
+  const input = document.getElementById('analyze-input');
+  const preview = document.getElementById('analyze-image-preview');
+  if (area) area.style.display = 'none';
+  if (input) { input.value = ''; input.placeholder = 'Вставьте текст результатов или фото (Cmd+V / Ctrl+V)...'; }
+  if (preview) preview.style.display = 'none';
+}
+
+function removeAnalyzeItem(idx) {
+  analyzeItems.splice(idx, 1);
+  renderAnalyzeItems();
+}
+
+function startRename(idx) {
+  const span = document.getElementById('alabel-' + idx);
+  const input = document.getElementById('alabel-input-' + idx);
+  if (!span || !input) return;
+  span.style.display = 'none';
+  input.style.display = 'inline-block';
+  input.focus();
+  input.select();
+}
+
+function finishRename(idx) {
+  const span = document.getElementById('alabel-' + idx);
+  const input = document.getElementById('alabel-input-' + idx);
+  if (!span || !input) return;
+  const newLabel = input.value.trim();
+  if (newLabel && analyzeItems[idx]) analyzeItems[idx].label = newLabel;
+  renderAnalyzeItems();
+}
+
+function renderAnalyzeItems() {
+  const list = document.getElementById('analyze-items-list');
+  if (!list) return;
+  if (analyzeItems.length === 0) { list.innerHTML = ''; return; }
+  // Снимки — сетка карточек, текст — строка
+  const images = analyzeItems.filter(it => it.type === 'image');
+  const texts = analyzeItems.filter(it => it.type === 'text');
+  let html = '';
+  html += analyzeItems.map((it, i) => {
+    const labelSpan = '<span id="alabel-' + i + '" style="font-size:13px;font-weight:600;color:#e0e0e0;margin-left:6px;">' + escapeHtml(it.label) + '</span>'
+      + '<input id="alabel-input-' + i + '" type="text" value="' + escapeHtml(it.label) + '" onblur="finishRename(' + i + ')" onkeydown="if(event.key===\'Enter\')this.blur()" style="display:none;font-size:13px;font-weight:600;background:#0f0f23;border:1px solid #ff6b35;border-radius:4px;color:#e0e0e0;padding:2px 6px;margin-left:6px;width:140px;" />';
+    const editBtn = '<button onclick="startRename(' + i + ')" title="Переименовать" style="background:none;border:none;color:#888;cursor:pointer;font-size:13px;padding:0 4px;margin-left:4px;">✏️</button>';
+    const removeBtn = '<button onclick="removeAnalyzeItem(' + i + ')" title="Удалить" style="background:none;border:none;color:#555;cursor:pointer;font-size:14px;padding:0 4px;">✕</button>';
+    if (it.type === 'image') {
+      return '<div style="display:flex;align-items:center;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:8px;padding:6px 10px;margin-bottom:4px;gap:4px;">'
+        + '<img src="' + it.preview_url + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;" />'
+        + labelSpan
+        + editBtn
+        + '<div style="margin-left:auto;">' + removeBtn + '</div>'
+        + '</div>';
+    } else {
+      return '<div style="display:flex;align-items:center;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;padding:6px 10px;margin-bottom:4px;gap:4px;">'
+        + '<span style="font-size:16px;flex-shrink:0;">📄</span>'
+        + labelSpan
+        + editBtn
+        + '<span style="color:#888;font-size:11px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + escapeHtml((it.text || '').slice(0, 60)) + (it.text && it.text.length > 60 ? '…' : '') + '</span>'
+        + '<div style="margin-left:auto;flex-shrink:0;">' + removeBtn + '</div>'
+        + '</div>';
+    }
+  }).join('');
+  list.innerHTML = html;
+}
+
+// Paste — работает на всей панели Анализы (не только на textarea)
 document.addEventListener('paste', function(e) {
-  if (!e.target || e.target.id !== 'analyze-input') return;
-  const items = e.clipboardData && e.clipboardData.items;
-  if (!items) return;
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].type.startsWith('image/')) {
+  const panel = document.getElementById('panel-analyze');
+  if (!panel || panel.style.display === 'none') return;
+  const clipItems = e.clipboardData && e.clipboardData.items;
+  if (!clipItems) return;
+  for (let i = 0; i < clipItems.length; i++) {
+    if (clipItems[i].type.startsWith('image/')) {
       e.preventDefault();
-      const file = items[i].getAsFile();
+      // Автоматически открываем режим фото если не открыт
+      pendingAddMode = 'photo';
+      const area = document.getElementById('analyze-add-area');
+      const textInput = document.getElementById('analyze-input');
+      const hint = document.getElementById('analyze-paste-hint');
+      if (area) area.style.display = 'block';
+      if (textInput) textInput.style.display = 'none';
+      if (hint) hint.style.display = 'none';
+      const file = clipItems[i].getAsFile();
       const reader = new FileReader();
       reader.onload = function(ev) {
         const img = new Image();
         img.onload = function() {
           const canvas = document.createElement('canvas');
-          canvas.width = img.width;
-          canvas.height = img.height;
+          canvas.width = img.width; canvas.height = img.height;
           canvas.getContext('2d').drawImage(img, 0, 0);
           const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-          analyzeImageType = 'image/jpeg';
-          analyzeImageData = jpegDataUrl.split(',')[1];
+          pendingImageType = 'image/jpeg';
+          pendingImageData = jpegDataUrl.split(',')[1];
           const imgEl = document.getElementById('analyze-image-el');
           const preview = document.getElementById('analyze-image-preview');
-          if (imgEl && preview) {
-            imgEl.src = jpegDataUrl;
-            preview.style.display = 'block';
-          }
+          if (imgEl && preview) { imgEl.src = jpegDataUrl; preview.style.display = 'block'; }
         };
         img.src = ev.target.result;
       };
@@ -1420,32 +1594,60 @@ document.addEventListener('paste', function(e) {
 });
 
 function analyzeResults(sessionId) {
-  const inputEl = document.getElementById('analyze-input');
   const resultEl = document.getElementById('analyze-result');
   const btnEl = document.getElementById('btn-analyze');
-  const labText = inputEl ? inputEl.value.trim() : '';
-  if (!labText && !analyzeImageData) { showToast('Вставьте результаты анализов или фото'); return; }
+  // Если есть незавершённый pending-элемент — добавляем его автоматически
+  if (pendingAddMode === 'photo' && pendingImageData) {
+    const labelEl = document.getElementById('analyze-label-input');
+    const imgEl = document.getElementById('analyze-image-el');
+    const label = (labelEl && labelEl.value.trim()) || 'Снимок';
+    analyzeItems.push({type: 'image', label, image_data: pendingImageData, image_type: pendingImageType || 'image/jpeg', preview_url: imgEl ? imgEl.src : ''});
+    cancelAddItem();
+    renderAnalyzeItems();
+  } else if (pendingAddMode === 'text') {
+    const inputEl = document.getElementById('analyze-input');
+    const labelEl = document.getElementById('analyze-label-input');
+    if (inputEl && inputEl.value.trim()) {
+      const label = (labelEl && labelEl.value.trim()) || 'Анализ';
+      analyzeItems.push({type: 'text', label, text: inputEl.value.trim()});
+      cancelAddItem();
+      renderAnalyzeItems();
+    }
+  }
+  if (analyzeItems.length === 0) { showToast('Добавьте хотя бы одно исследование'); return; }
   btnEl.disabled = true;
   btnEl.textContent = '⏳ Анализирую...';
   resultEl.innerHTML = '<div class="ar-placeholder">ИИ обрабатывает данные...</div>';
-  const payload = {session_id: sessionId, lab_text: labText};
-  if (analyzeImageData) {
-    payload.image_data = analyzeImageData;
-    payload.image_type = analyzeImageType || 'image/jpeg';
-  }
+  const payload = {session_id: sessionId, items: analyzeItems.map(it => {
+    const out = {type: it.type, label: it.label};
+    if (it.type === 'text') out.text = it.text;
+    if (it.type === 'image') { out.image_data = it.image_data; out.image_type = it.image_type; }
+    return out;
+  })};
   fetch('/api/analyze', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
   })
-  .then(r => r.json())
+  .then(r => {
+    if (r.status === 401) { location.href = '/login'; throw new Error('session_expired'); }
+    return r.json();
+  })
   .then(data => {
     btnEl.disabled = false;
     btnEl.textContent = '🔬 Интерпретировать';
     if (data.error) { resultEl.innerHTML = '<div class="ar-crit">Ошибка: ' + escapeHtml(data.error) + '</div>'; return; }
     resultEl.innerHTML = renderAnalysis(data.result || '');
+    analyzeItems = [];
+    renderAnalyzeItems();
+    if (activeSession && cases[activeSession]) {
+      cases[activeSession].analysis = data.result;
+      const soapPanel = document.getElementById('panel-soap');
+      if (soapPanel) soapPanel.innerHTML = renderSoap(cases[activeSession].soap || '', data.result);
+    }
   })
   .catch(err => {
+    if (String(err).includes('session_expired')) return;
     btnEl.disabled = false;
     btnEl.textContent = '🔬 Интерпретировать';
     resultEl.innerHTML = '<div class="ar-crit">Ошибка соединения: ' + escapeHtml(String(err)) + '</div>';
@@ -1472,10 +1674,10 @@ function renderAnalysis(text) {
   }).join('');
 }
 
-function renderSoap(text) {
+function renderSoap(text, analysis) {
   const NL = String.fromCharCode(10);
   const lines = text.split(NL);
-  return lines.map(line => {
+  let html = lines.map(line => {
     const safe = escapeHtml(line);
     if (safe.startsWith('# ')) return '<div class="soap-h1">' + safe.slice(2) + '</div>';
     if (safe.startsWith('## ')) return '<div class="soap-h2">' + safe.slice(3) + '</div>';
@@ -1483,6 +1685,13 @@ function renderSoap(text) {
     const bold = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     return bold + '<br>';
   }).join('');
+  if (analysis) {
+    html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #2a2a4a;">'
+          + '<div class="soap-h2" style="color:#ff6b35;">🔬 ИССЛЕДОВАНИЯ</div>'
+          + renderAnalysis(analysis)
+          + '</div>';
+  }
+  return html;
 }
 
 function extractDraft(soap) {
@@ -1606,7 +1815,9 @@ function reloadSessions() {
       const t = new Date().toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
       let newCount = 0;
       list.forEach(c => {
-        const isNew = !cases[c.session_id];
+        const existing = cases[c.session_id];
+        const isNew = !existing;
+        const soapArrived = existing && !existing.soap && c.soap && c.session_id === activeSession;
         cases[c.session_id] = c;
         if (isNew) {
           newCount++;
@@ -1614,6 +1825,9 @@ function reloadSessions() {
           if (!activeSession) {
             try { selectCase(c.session_id); } catch(e) { console.error('selectCase error:', e); }
           }
+        } else if (soapArrived) {
+          const soapPanel = document.getElementById('panel-soap');
+          if (soapPanel) soapPanel.innerHTML = renderSoap(c.soap, c.analysis || '');
         }
       });
       renderSidebar();
@@ -1833,6 +2047,7 @@ async def api_sessions():
                 "label": extract_patient_label(s),
                 "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
                 "soap": s.get("soap"),
+                "analysis": s.get("analysis", ""),
                 "time": s.get("created_at", ""),
                 "status": s.get("status"),
                 "messages": [{"role": m["role"], "text": m["text"]} for m in s.get("messages", [])],
@@ -1874,7 +2089,7 @@ async def logout(request: Request):
 async def sse_events(request: Request):
     """SSE-поток для кокпита врача. Работает в Safari (в отличие от WebSocket)."""
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
 
     queue: asyncio.Queue = asyncio.Queue()
     sse_queues.append(queue)
@@ -1889,6 +2104,7 @@ async def sse_events(request: Request):
                 "label": extract_patient_label(s),
                 "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
                 "soap": s.get("soap"),
+                "analysis": s.get("analysis", ""),
                 "time": s.get("created_at", ""),
                 "status": s.get("status"),
                 "messages": [{"role": m["role"], "text": m["text"]} for m in s.get("messages", [])],
@@ -1922,7 +2138,7 @@ async def sse_events(request: Request):
 @app.post("/api/approve")
 async def api_approve(request: Request):
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     data = await request.json()
     sid = data.get("session_id", "")
     approved_msg = data.get("message", "")
@@ -1943,7 +2159,7 @@ async def api_approve(request: Request):
 @app.post("/api/reject")
 async def api_reject(request: Request):
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     data = await request.json()
     sid = data.get("session_id", "")
     if sid not in sessions:
@@ -1956,7 +2172,7 @@ async def api_reject(request: Request):
 @app.post("/api/appointment")
 async def api_appointment(request: Request):
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     data = await request.json()
     appt = {
         "id": secrets.token_hex(6),
@@ -1975,14 +2191,14 @@ async def api_appointment(request: Request):
 async def api_appointments(request: Request):
     from fastapi.responses import JSONResponse
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     return JSONResponse(appointments)
 
 
 @app.delete("/api/appointment/{appt_id}")
 async def api_delete_appointment(appt_id: str, request: Request):
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     global appointments
     appointments = [a for a in appointments if a["id"] != appt_id]
     return {"ok": True}
@@ -1992,13 +2208,21 @@ async def api_delete_appointment(appt_id: str, request: Request):
 async def api_analyze(request: Request):
     """Интерпретация анализов — Claude разбирает результаты в контексте SOAP-заметки."""
     if not _check_session(request):
-        return Response("Unauthorized", status_code=401)
+        return JSONResponse({"error": "session_expired"}, status_code=401)
     data = await request.json()
     session_id = data.get("session_id", "")
-    lab_text = data.get("lab_text", "").strip()
-    image_data = data.get("image_data", "")   # base64
-    image_type = data.get("image_type", "image/jpeg")
-    if not lab_text and not image_data:
+    # Новый формат: items = [{type, label, text?, image_data?, image_type?}]
+    items = data.get("items", [])
+    # Обратная совместимость со старым форматом
+    if not items:
+        lab_text = data.get("lab_text", "").strip()
+        image_data = data.get("image_data", "")
+        image_type = data.get("image_type", "image/jpeg")
+        if lab_text:
+            items.append({"type": "text", "label": "Результаты", "text": lab_text})
+        if image_data:
+            items.append({"type": "image", "label": "Снимок", "image_data": image_data, "image_type": image_type})
+    if not items:
         return {"error": "Нет данных для анализа"}
 
     session = sessions.get(session_id, {})
@@ -2006,7 +2230,7 @@ async def api_analyze(request: Request):
 
     if DEMO_MODE:
         await asyncio.sleep(1.5)
-        return {"result": """## Общий анализ крови
+        demo_result = """## Общий анализ крови
 
 **Гемоглобин 98 г/л** — ↓ ниже нормы (норма 115–145 г/л для данного возраста). Лёгкая железодефицитная анемия.
 **Лейкоциты 12.4×10⁹/л** — ↑ умеренный лейкоцитоз. Характерен для бактериальной инфекции или вирусного воспаления.
@@ -2020,7 +2244,10 @@ async def api_analyze(request: Request):
 
 - Рассмотреть дополнительно: ферритин, сывороточное железо, TIBC
 - При подтверждении ЖДА — препараты железа после купирования острого процесса
-- Контроль ОАК через 2–3 недели"""}
+- Контроль ОАК через 2–3 недели"""
+        if session_id in sessions:
+            sessions[session_id]["analysis"] = demo_result
+        return {"result": demo_result}
 
     try:
         import anthropic
@@ -2033,39 +2260,44 @@ async def api_analyze(request: Request):
 
 """
 
-        text_part = ""
-        if lab_text:
-            text_part = f"\nРезультаты исследований (текст):\n{lab_text}\n"
-
         task_instructions = """
-Задача: интерпретируй результаты как клинический ассистент педиатра.
+Задача: интерпретируй все предоставленные результаты как клинический ассистент педиатра.
 
 Структура ответа (используй Markdown ##):
-1. Разбор каждого показателя — норма/отклонение, клиническое значение
-2. Общая картина — что всё это означает в контексте жалоб
+1. По каждому исследованию — разбор показателей (норма/отклонение ↑↓, клиническое значение)
+2. Общая картина — что всё вместе означает в контексте жалоб пациента
 3. На что обратить внимание врачу — какие дополнительные данные нужны, какие шаги рассмотреть
 
-Пиши кратко, по делу, для врача. Отклонения обозначай стрелками ↑↓."""
+Пиши кратко, по делу, для врача."""
 
-        if image_data:
-            # Vision: передаём картинку + текст
+        has_images = any(it.get("type") == "image" and it.get("image_data") for it in items)
+        if has_images:
             content = []
             if context_block:
                 content.append({"type": "text", "text": context_block})
-            content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": image_type,
-                    "data": image_data,
-                }
-            })
-            if text_part:
-                content.append({"type": "text", "text": text_part})
+            for it in items:
+                label = it.get("label", "Исследование")
+                if it.get("type") == "image" and it.get("image_data"):
+                    content.append({"type": "text", "text": f"[{label}]:"})
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": it.get("image_type", "image/jpeg"),
+                            "data": it["image_data"],
+                        }
+                    })
+                elif it.get("type") == "text" and it.get("text"):
+                    content.append({"type": "text", "text": f"[{label}]:\n{it['text']}\n"})
             content.append({"type": "text", "text": task_instructions})
         else:
-            prompt = f"{context_block}{text_part}{task_instructions}"
-            content = prompt
+            parts = [context_block] if context_block else []
+            for it in items:
+                label = it.get("label", "Исследование")
+                if it.get("text"):
+                    parts.append(f"[{label}]:\n{it['text']}\n")
+            parts.append(task_instructions)
+            content = "\n".join(parts)
 
         response = await client.messages.create(
             model="claude-haiku-4-5",
@@ -2073,7 +2305,10 @@ async def api_analyze(request: Request):
             system="Ты клинический ассистент педиатра. Интерпретируй результаты исследований точно и кратко на русском языке. Указывай нормы для детского возраста. Не ставь диагноз — только помогай врачу увидеть клиническую картину.",
             messages=[{"role": "user", "content": content}],
         )
-        return {"result": response.content[0].text}
+        result_text = response.content[0].text
+        if session_id in sessions:
+            sessions[session_id]["analysis"] = result_text
+        return {"result": result_text}
     except Exception as e:
         return {"error": str(e)}
 
@@ -2115,6 +2350,7 @@ async def cockpit_websocket(websocket: WebSocket):
                 "label": extract_patient_label(s),
                 "preview": (s.get("messages") or [{"text": ""}])[-1].get("text", "")[:60],
                 "soap": s.get("soap"),
+                "analysis": s.get("analysis", ""),
                 "time": s.get("created_at", ""),
                 "status": s.get("status"),
                 "messages": [
